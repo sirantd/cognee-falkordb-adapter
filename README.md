@@ -16,18 +16,38 @@ not a production adapter.
 
 ## Status
 
-**Stage A3 — the coercion layer is in.** All 41 methods are implemented (the
+**Stage A4 — the adapter is code-complete.** All 41 methods are implemented (the
 burn-down, `pytest -s`, reads `0/41`), ported from cognee's in-core Neo4j adapter
 with APOC replaced, the GDS block dropped, and the two `*_node_truth_state`
-methods taken from ladybug. `coercion.py` now decides what reaches the store, and
-every rule in it is a measurement — see [Coercion](#coercion).
+methods taken from ladybug. `coercion.py` decides what reaches the store, and
+every rule in it is a measurement — see [Coercion](#coercion). Every id lookup is
+plan-verified index-backed — see [Indexes](#indexes).
 
 cognee's own provenance contract suite passes **19/19** against a live FalkorDB.
 Wiring that into CI — and pinning the cognee version it came from — is stage A5;
 until then it is verified by hand, not by a gate.
 
-Still outstanding: **A4** (the index families are created but their `EXPLAIN`
-gate is only asserted for the shared label).
+## Indexes
+
+`initialize()` creates `(id)` range indexes on the shared `__Node__` label and on
+each of the six cognee type labels. **Nothing else creates them and the failure is
+silent**, so `test_indexes.py` asserts the *execution plan* rather than the index
+list. Three things make that assertion worth having:
+
+- It excludes `Node By Label Scan`, not just `All Node Scan`. A label without an
+  index still narrows the scan and still walks every node of it — and that is
+  precisely what #68's probe let through while reporting success.
+- It reads `str(plan)`, never the iterated `ExecutionPlan`. ⚠ Iterating yields
+  each operation name **once**, so a two-endpoint MERGE with two
+  `Node By Index Scan` siblings iterates as a single entry and a regression on the
+  second endpoint is invisible.
+- It explains the queries the adapter *actually emits*, params and all, captured
+  by wrapping the driver during a real call. A hand-written approximation is how a
+  probe passes while production scans.
+
+Verified to fail as intended: with `initialize()` skipped, every shape —
+shared-label lookup, type-label lookup and the loader's two-endpoint MERGE —
+degrades to `Node By Label Scan`.
 
 ## Scope: 41 methods, not 48
 
@@ -59,9 +79,9 @@ sync Redis rejects — in the constructor, before any connection, so nothing wor
 at all. The sync client is unaffected, which is how this gets missed.
 
 **Nothing else creates the id indexes, and the failure is silent.** An unindexed
-id lookup degrades to an All-Node-Scan with no error — measured at 9.6 ms versus
+id lookup degrades to a full scan with no error — measured at 9.6 ms versus
 2.0 ms per lookup, and the difference between an 84.5 s bulk load and a 2,114 s
-one. `initialize()` creates them; call it.
+one. `initialize()` creates them; call it. See [Indexes](#indexes).
 
 **A `null` property value is a DELETE.** Not a no-op, and not a silent drop —
 FalkorDB follows Neo4j here, so `SET n += {k: null}` removes a stored `k`. A bare
