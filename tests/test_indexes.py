@@ -47,7 +47,9 @@ async def adapter():
 async def test_initialize_creates_both_index_families(adapter):
     await adapter.initialize()
 
-    indexed = {row[0] for row in await adapter.query("CALL db.indexes()")}
+    # A2 made query() return dict rows keyed by column name; `db.indexes()`
+    # names its first column `label`.
+    indexed = {row["label"] for row in await adapter.query("CALL db.indexes()")}
     for label in (BASE_LABEL, *NODE_TYPE_LABELS):
         assert label in indexed, f"no index on {label}(id) — id lookups will All-Node-Scan"
 

@@ -36,6 +36,14 @@ RUNTIME_REACHED = frozenset(
     """.split()
 )
 
+# ⚠ Scoped as "override only if slow", and that was wrong. The interface's
+# default is a NO-OP, while the provenance contract suite asserts the tags are
+# actually removed — so a backend that inherits it fails
+# `test_remove_belongs_to_set_tags_scoped_and_unscoped`. Both in-core adapters
+# that pass the suite implement it. Folded into the target here so the
+# correction has a test behind it: the build target is 41 methods, not 40.
+MUST_OVERRIDE_A_REAL_DEFAULT = frozenset({"remove_belongs_to_set_tags"})
+
 # Reached by NOTHING in cognee's runtime — left inheriting the raising default on
 # purpose. Asserted explicitly so that "we skipped these" stays a decision with a
 # test behind it rather than an oversight nobody notices.
@@ -64,9 +72,13 @@ def test_adapter_is_concrete():
     )
 
 
+def _target() -> frozenset[str]:
+    return _abstract_methods() | RUNTIME_REACHED | MUST_OVERRIDE_A_REAL_DEFAULT | {"has_node"}
+
+
 def test_target_surface_is_defined_on_the_adapter():
-    """The 40-method target is defined here, not inherited from the interface."""
-    target = _abstract_methods() | RUNTIME_REACHED | {"has_node"}
+    """The whole target is defined here, not inherited from the interface."""
+    target = _target()
     own = set()
     for klass in FalkorDBAdapter.__mro__:
         if klass is GraphDBInterface:
@@ -92,7 +104,9 @@ def test_weight_surface_is_left_inherited_on_purpose():
     )
 
 
-@pytest.mark.parametrize("name", sorted(_abstract_methods() | RUNTIME_REACHED))
+@pytest.mark.parametrize(
+    "name", sorted(_abstract_methods() | RUNTIME_REACHED | MUST_OVERRIDE_A_REAL_DEFAULT)
+)
 def test_signature_does_not_narrow_the_interface(name):
     """Every call valid against GraphDBInterface must be valid against us.
 
@@ -137,7 +151,7 @@ def test_stub_burndown_is_reported(capsys):
     a number that moves, instead of the work being invisible until the contract
     suite flips from red to green.
     """
-    target = _abstract_methods() | RUNTIME_REACHED | {"has_node"}
+    target = _target()
     stubs = sorted(
         name
         for name in target

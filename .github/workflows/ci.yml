@@ -7,8 +7,10 @@ on:
 
 jobs:
   surface:
-    # The cheap gate: abstract coverage and signature drift against the pinned
-    # cognee. Needs no server, so it must never be gated behind one.
+    # The cheap gate: abstract coverage, signature drift against the pinned
+    # cognee, and the pure port helpers. Needs no server, so it must never be
+    # gated behind one — hence "not integration" rather than a file list, which
+    # would silently stop covering the next server-free test module added.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -16,7 +18,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e '.[test]'
-      - run: pytest -s tests/test_surface.py
+      - run: pytest -s -m "not integration"
 
   contract:
     # The real gate: cognee's own backend-neutral graph-provenance contract
