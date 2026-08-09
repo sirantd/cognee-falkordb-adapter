@@ -39,6 +39,15 @@ NODE_TYPE_LABELS = (
     "NodeSet",
 )
 
+# Connection defaults, used only when cognee's config leaves the corresponding
+# field empty. 📌 There is deliberately no default for a *wrong* value: cognee's
+# unset port sentinel (``GraphConfig.graph_database_port`` = 123) is passed
+# through rather than rewritten, so a missing GRAPH_DATABASE_PORT is a refused
+# connection instead of a silent connection to whatever holds the redis port.
+DEFAULT_HOST = "localhost"
+DEFAULT_PORT = 6379
+DEFAULT_GRAPH_NAME = "cognee_graph"
+
 # Graph-level metadata (provenance version / delete mode) has nowhere natural to
 # live in a property graph, so it goes on a singleton node carrying this label.
 # Excluded from every domain query by construction — it never gets BASE_LABEL.

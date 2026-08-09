@@ -16,15 +16,43 @@ not a production adapter.
 
 ## Status
 
-**Stage A5 — stage A is complete.** All 41 methods are implemented (the
-burn-down, `pytest -s`, reads `0/41`), ported from cognee's in-core Neo4j adapter
-with APOC replaced, the GDS block dropped, and the two `*_node_truth_state`
-methods taken from ladybug. `coercion.py` decides what reaches the store, and
-every rule in it is a measurement — see [Coercion](#coercion). Every id lookup is
-plan-verified index-backed — see [Indexes](#indexes).
+**Stage B2 — deployable.** All 41 methods are implemented (the burn-down,
+`pytest -s`, reads `0/41`), ported from cognee's in-core Neo4j adapter with APOC
+replaced, the GDS block dropped, and the two `*_node_truth_state` methods taken
+from ladybug. `coercion.py` decides what reaches the store, and every rule in it
+is a measurement — see [Coercion](#coercion). Every id lookup is plan-verified
+index-backed — see [Indexes](#indexes).
 
 cognee's own provenance contract suite passes **19/19** against a live FalkorDB —
 now as a CI gate rather than by hand. See [The contract gate](#the-contract-gate).
+
+## cognee constructs this, and it does not use your keyword names
+
+A registered adapter is built by `_create_graph_engine` as:
+
+```python
+adapter(graph_database_url=…, graph_database_username=…, graph_database_password=…,
+        graph_database_port=…, graph_database_key=…, database_name=…)
+```
+
+🚨 **Stage A shipped green on a constructor that could not bind three of those**
+(`graph_database_port`, `graph_database_key`, `database_name`) — every test in the
+repo, the contract suite included, constructed the adapter *directly*, so the only
+call production ever makes was the one nothing exercised. It would have failed as
+a `TypeError` on the first cognify, indistinguishable from an unregistered
+provider. `tests/test_factory.py` now reads that keyword list **out of cognee's
+own AST** and binds it against the signature, because restating the list by hand
+is precisely the mistake it is catching.
+
+Two more things that surprise:
+
+- **`graph_database_url` is a host, not a URL.** `GRAPH_DATABASE_URL=localhost` is
+  cognee's own documented form for a client-server graph store. A value carrying a
+  scheme still goes through `FalkorDB.from_url`; anything else is a hostname.
+- **cognee's unset port is `123`**, not empty (`GraphConfig.graph_database_port`).
+  It is passed through rather than rewritten to 6379 — a forgotten
+  `GRAPH_DATABASE_PORT` should be a refused connection naming port 123, not a
+  successful connection to whatever else holds the redis port.
 
 ## The contract gate
 

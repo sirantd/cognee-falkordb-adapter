@@ -61,6 +61,9 @@ from cognee.shared.logging_utils import get_logger
 from .coercion import coerce_properties, scrub_nul
 from .constants import (
     BASE_LABEL,
+    DEFAULT_GRAPH_NAME,
+    DEFAULT_HOST,
+    DEFAULT_PORT,
     METADATA_LABEL,
     METADATA_NODE_ID,
     NODE_TYPE_LABELS,
@@ -228,12 +231,45 @@ class FalkorDBAdapter(GraphDBInterface):
         graph_database_url: Optional[str] = None,
         graph_database_username: Optional[str] = None,
         graph_database_password: Optional[str] = None,
+        graph_database_port: Union[int, str, None] = None,
+        graph_database_key: Optional[str] = None,
+        database_name: Optional[str] = None,
         graph_database_name: Optional[str] = None,
-        host: str = "localhost",
-        port: int = 6379,
+        host: Optional[str] = None,
+        port: Union[int, str, None] = None,
         driver: Optional[Any] = None,
     ):
         """Open a FalkorDB client and select the graph.
+
+        🚨 **The keyword names are cognee's, not ours.** A registered adapter is
+        constructed by ``_create_graph_engine`` as::
+
+            adapter(graph_database_url=…, graph_database_username=…,
+                    graph_database_password=…, graph_database_port=…,
+                    graph_database_key=…, database_name=…)
+
+        so every one of those six has to bind or the adapter cannot be built at
+        all — a ``TypeError`` on the first cognify, recall or delete, identical
+        to a missing provider. ``test_factory.py`` reads that call out of
+        cognee's own AST rather than trusting this list.
+
+        🚨 ``graph_database_url`` is a **host**, not a URL, in every cognee
+        deployment of a client-server graph store (``GRAPH_DATABASE_URL=localhost``
+        is cognee's own documented form, and it is what #68's spike ran). A value
+        carrying a scheme is still honoured through ``from_url``; anything else is
+        a hostname, because handing ``FalkorDB.from_url`` a bare host fails in a
+        way that reads as a connectivity problem.
+
+        ⚠ ``graph_database_key`` has no FalkorDB meaning — it is Neptune's and
+        Turso's auth token. It is accepted because cognee passes it unconditionally,
+        and warned about rather than silently dropped, since a populated one means
+        the operator expected authentication that is not happening.
+
+        📌 The port is **not** defaulted away from cognee's unset sentinel (``123``,
+        ``GraphConfig.graph_database_port``). Silently rewriting it to 6379 would
+        turn "you forgot ``GRAPH_DATABASE_PORT``" into a connection to whatever
+        else answers on the redis port; left alone it is a refused connection here
+        in the constructor, which says what it is.
 
         🚨 ``FalkorDB.__init__`` is BLOCKING and requires a reachable server: it
         calls ``Is_Cluster()``, which issues a synchronous ``INFO``. So this
@@ -242,16 +278,27 @@ class FalkorDBAdapter(GraphDBInterface):
         it means "the adapter constructed" already proves the server is up, and
         a construction failure is a connectivity failure, not a config error.
         """
-        self._graph_name = graph_database_name or "cognee_graph"
+        # cognee passes "" for anything unset, so falsiness — not None — is what
+        # separates "not configured" from "configured".
+        self._graph_name = database_name or graph_database_name or DEFAULT_GRAPH_NAME
+
+        if graph_database_key:
+            logger.warning(
+                "graph_database_key is set but FalkorDB has no such credential; ignoring it. "
+                "Use graph_database_username / graph_database_password instead."
+            )
+
+        resolved_host = host or graph_database_url or DEFAULT_HOST
+        resolved_port = int(port or graph_database_port or DEFAULT_PORT)
 
         if driver is not None:  # tests inject a fake
             self._db = driver
-        elif graph_database_url:
-            self._db = FalkorDB.from_url(graph_database_url)
+        elif "://" in str(resolved_host):
+            self._db = FalkorDB.from_url(resolved_host)
         else:
             self._db = FalkorDB(
-                host=host,
-                port=port,
+                host=resolved_host,
+                port=resolved_port,
                 username=graph_database_username or None,
                 password=graph_database_password or None,
             )

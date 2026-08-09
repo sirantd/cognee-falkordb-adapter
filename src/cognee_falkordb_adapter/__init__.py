@@ -9,4 +9,4 @@ from .adapter import FalkorDBAdapter
 from .constants import BASE_LABEL, NODE_TYPE_LABELS, PROVENANCE_COLUMNS
 
 __all__ = ["FalkorDBAdapter", "BASE_LABEL", "NODE_TYPE_LABELS", "PROVENANCE_COLUMNS"]
-__version__ = "0.1.0"
+__version__ = "0.2.0"
