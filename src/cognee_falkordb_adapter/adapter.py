@@ -24,8 +24,12 @@ Stage A2 resolved the port delta from that seed:
 * ``get_node_truth_state`` / ``set_node_truth_state`` come from cognee's ladybug
   adapter, which is the only in-core adapter that implements them.
 
-⚠ Property **coercion** is stage A3: this module serializes UUIDs and maps the
-way the Neo4j seed does, but null-stripping and C0 scrubbing are not here yet.
+Stage A3 added the **coercion layer** in ``coercion.py``: what the store can hold
+(:func:`~.coercion.coerce_properties`, reached through
+:meth:`FalkorDBAdapter.serialize_properties`) and what the parameter parser can
+carry (:func:`~.coercion.scrub_nul`, applied to every query's params at
+:meth:`FalkorDBAdapter.query`). Its rule table is measured; read it before
+changing anything that writes a property.
 """
 
 from __future__ import annotations
@@ -52,9 +56,9 @@ from cognee.infrastructure.databases.provenance.source_ref_state import (
     provenance_attach_inputs,
 )
 from cognee.infrastructure.engine import DataPoint
-from cognee.modules.storage.utils import JSONEncoder
 from cognee.shared.logging_utils import get_logger
 
+from .coercion import coerce_properties, scrub_nul
 from .constants import (
     BASE_LABEL,
     METADATA_LABEL,
@@ -102,10 +106,23 @@ def _quote(identifier: str) -> str:
     are arbitrary text; every other character (spaces, punctuation, unicode)
     survives quoting intact, so the stored type still round-trips through
     ``type(r)`` for the provenance lookups that match it by parameter.
+
+    NUL goes too, for the coercion layer's reason rather than this one: an
+    identifier is interpolated into the query TEXT, and the parser truncates
+    there exactly as it does on a parameter.
     """
-    cleaned = identifier.replace("`", "")
+    without_nul = scrub_nul(identifier)
+    cleaned = without_nul.replace("`", "")
     if cleaned != identifier:
-        logger.warning("Dropped backtick(s) from graph identifier %r", identifier)
+        dropped = " and ".join(
+            name
+            for name, was_dropped in (
+                ("NUL", without_nul != identifier),
+                ("backtick(s)", cleaned != without_nul),
+            )
+            if was_dropped
+        )
+        logger.warning("Dropped %s from graph identifier %r", dropped, identifier)
     return f"`{cleaned}`"
 
 
@@ -259,8 +276,20 @@ class FalkorDBAdapter(GraphDBInterface):
         for cognee's CYPHER / NATURAL_LANGUAGE retrievers, which hand the result
         straight to an LLM. Node and relationship values are unwrapped to their
         property dicts, exactly as neo4j's ``Result.data()`` does.
+
+        🚨 **This is where NUL is scrubbed, and it has to be here rather than in
+        the property coercion.** NUL is the one character FalkorDB's parameter
+        parser rejects, and it can arrive on paths that never build a property
+        map: a tag list, a filter value, graph metadata, an id being looked up.
+        Scrubbing at the single boundary also keeps write and read *symmetric* —
+        a value stored without its NUL is only findable by a lookup key that lost
+        the same NUL.
         """
-        result = await self._graph.query(query, params or {})
+        given = params or {}
+        scrubbed = scrub_nul(given)
+        if scrubbed is not given:  # scrub_nul returns its input untouched otherwise
+            logger.warning("Stripped NUL byte(s) from query parameters before sending")
+        result = await self._graph.query(query, scrubbed)
         return self._rows(result)
 
     @staticmethod
@@ -319,42 +348,28 @@ class FalkorDBAdapter(GraphDBInterface):
     # ------------------------------------------------------------------
 
     def serialize_properties(self, properties: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Convert a property dict into values FalkorDB accepts.
+        """Convert a property dict into values FalkorDB will store.
 
-        FalkorDB stores primitives and arrays of primitives natively and
-        **rejects a map outright** (``Property values can only be of primitive
-        types or arrays of primitive types``), so maps are JSON-encoded under
-        their own key — no ``_json`` suffix, unlike the Neo4j seed's edge path,
-        because renaming the key would make a property unreadable by anything
-        that looks for it by name.
+        Two steps, and only the first is cognee-specific: ``weights`` is expanded
+        into ``weight_<name>`` scalars — cognee's own visualization preprocessor
+        reads that shape, and ``get_graph_from_model`` already emits it upstream —
+        and everything then goes through :func:`~.coercion.coerce_properties`,
+        where the measured store rules live.
 
-        ⚠ Arrays are passed through rather than JSON-encoded (the seed encodes
-        them on edges only, which is a Neo4j-side habit, not a requirement) and
-        ⚠ ``None`` values are still passed through here — FalkorDB accepts and
-        then *silently drops* them. Stripping them explicitly is stage A3.
+        🚨 A ``None`` value leaves as an **absent key**, not as a null: FalkorDB
+        treats a null as a *delete*, so passing one through would strip whatever
+        another pipeline had stored under that key. The full rule table, and the
+        measurements behind each rule, are in ``coercion.py``.
         """
-        serialized: Dict[str, Any] = {}
+        flattened: Dict[str, Any] = {}
 
         for key, value in (properties or {}).items():
-            if isinstance(value, UUID):
-                serialized[key] = str(value)
-            elif key == "weights" and isinstance(value, dict):
-                # Flattened rather than JSON-encoded because cognee's own
-                # visualization preprocessor reads `weight_<name>` scalars, and
-                # `get_graph_from_model` already emits that shape upstream.
-                for weight_name, weight_value in value.items():
-                    serialized[f"weight_{weight_name}"] = weight_value
-            elif isinstance(value, dict):
-                serialized[key] = json.dumps(value, cls=JSONEncoder)
-            elif isinstance(value, (list, tuple)) and any(
-                isinstance(item, (dict, list, tuple)) for item in value
-            ):
-                # An array of primitives is native; a nested one is not.
-                serialized[key] = json.dumps(list(value), cls=JSONEncoder)
+            if key == "weights" and isinstance(value, dict):
+                flattened.update({f"weight_{name}": weight for name, weight in value.items()})
             else:
-                serialized[key] = value
+                flattened[key] = value
 
-        return serialized
+        return coerce_properties(flattened)
 
     def _node_payload(self, node: Any) -> Tuple[str, Optional[str], Dict[str, Any]]:
         """Return ``(node_id, type_label, serialized_properties)`` for one input node.
@@ -1268,7 +1283,15 @@ class FalkorDBAdapter(GraphDBInterface):
     async def set_node_truth_state(
         self, node_truth_state: Dict[str, Dict[str, Any]]
     ) -> Dict[str, bool]:
-        """Persist truth state per node; returns ``{node_id: updated}``."""
+        """Persist truth state per node; returns ``{node_id: updated}``.
+
+        ⚠ A ``truth_epoch`` of ``None`` means "this call carries no epoch", not
+        "clear the stored one", so the batch is split and the null is never
+        written — ``SET n.truth_epoch = null`` would **delete** the property
+        (measured; see ``coercion.py``). That matches ladybug, which likewise
+        omits the key from its update when the epoch is ``None``, and it is the
+        same rule the coercion layer applies to every other property.
+        """
         if not node_truth_state:
             return {}
         node_ids = list(node_truth_state.keys())
@@ -1282,10 +1305,6 @@ class FalkorDBAdapter(GraphDBInterface):
                 {
                     "node_id": node_id,
                     "alignment": list((state or {}).get("truth_alignment") or []),
-                    # ⚠ Written only when present: FalkorDB accepts a null
-                    # property value and then silently drops it, so writing None
-                    # would leave a stale epoch in place while looking like a
-                    # successful clear.
                     "epoch": int(epoch) if epoch is not None else None,
                 }
             )

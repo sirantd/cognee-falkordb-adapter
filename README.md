@@ -16,20 +16,20 @@ not a production adapter.
 
 ## Status
 
-**Stage A2 — the port delta is resolved.** All 40 methods are implemented; the
-burn-down (`pytest -s`) reads `0/40`. Ported from cognee's in-core Neo4j adapter
+**Stage A3 — the coercion layer is in.** All 41 methods are implemented (the
+burn-down, `pytest -s`, reads `0/41`), ported from cognee's in-core Neo4j adapter
 with APOC replaced, the GDS block dropped, and the two `*_node_truth_state`
-methods taken from ladybug.
+methods taken from ladybug. `coercion.py` now decides what reaches the store, and
+every rule in it is a measurement — see [Coercion](#coercion).
 
-cognee's own provenance contract suite already passes **19/19** against a live
-FalkorDB. Wiring that into CI — and pinning the cognee version it came from — is
-stage A5; until then it is verified by hand, not by a gate.
+cognee's own provenance contract suite passes **19/19** against a live FalkorDB.
+Wiring that into CI — and pinning the cognee version it came from — is stage A5;
+until then it is verified by hand, not by a gate.
 
-Still outstanding: **A3** (coercion — nulls stripped, C0 scrubbed) and **A4**
-(the index families are created but their `EXPLAIN` gate is only asserted for
-the shared label).
+Still outstanding: **A4** (the index families are created but their `EXPLAIN`
+gate is only asserted for the shared label).
 
-## Scope: 40 methods, not 48
+## Scope: 41 methods, not 48
 
 `GraphDBInterface` declares 48 public methods. Measured against cognee 1.4.1:
 
@@ -50,7 +50,7 @@ tags are actually removed, so a backend that inherits it fails
 `test_remove_belongs_to_set_tags_scoped_and_unscoped`. Both in-core adapters that
 pass the suite implement it, and so does this one — 41 methods, not 40.
 
-## Two things that will bite
+## Three things that will bite
 
 **Pin `redis < 8.1.0`.** falkordb-py's async `FalkorDB.__init__` calls
 `Is_Cluster()`, which copies the *async* pool's `connection_kwargs` into a *sync*
@@ -63,9 +63,33 @@ id lookup degrades to an All-Node-Scan with no error — measured at 9.6 ms vers
 2.0 ms per lookup, and the difference between an 84.5 s bulk load and a 2,114 s
 one. `initialize()` creates them; call it.
 
-**A `null` property value is accepted and silently dropped** (a map, by contrast,
-is rejected loudly). Stripping nulls before the write is stage A3; until then a
-`None` reaches the store and simply vanishes.
+**A `null` property value is a DELETE.** Not a no-op, and not a silent drop —
+FalkorDB follows Neo4j here, so `SET n += {k: null}` removes a stored `k`. A bare
+cognee DataPoint dumps 7 null-valued keys, so passing them through would make
+every re-cognify strip properties another pipeline had filled in. The coercion
+layer drops the key instead; there is deliberately no "clear this property" path.
+
+## Coercion
+
+`coercion.py` has two jobs, separated because they fail differently: what the
+**store** can hold (`coerce_properties`, reached via `serialize_properties`) and
+what the **parameter parser** can carry (`scrub_nul`, applied to every query's
+params). Measured against FalkorDB v4.20.1 / falkordb-py 1.6.2:
+
+| input | behaviour | rule |
+|---|---|---|
+| `None` property value | **deletes** the stored property | drop the key |
+| `None` inside an array | `ResponseError` — fails the whole `UNWIND` batch | drop the entry |
+| map, at any depth inside a value | `ResponseError` | JSON-encode |
+| nested / heterogeneous array of primitives | stored natively, exact round-trip | pass through |
+| `UUID`, `bytes`, or any other unknown type | stringified *unquoted* by falkordb-py → `Failed to parse query parameter` | `str()`, `decode()` for bytes |
+| `\x00` in a value, key, array item or identifier | `Failed to parse query parameter` | strip |
+| every other C0, and DEL | accepted, round-trips byte-identically | keep |
+
+⚠ The last two rows correct the spec this was built from, which said FalkorDB
+rejects C0 control characters outright. Only NUL is rejected. The spike's
+`graph_io.scrub` strips all of C0 — a superset, so a graph it migrated stays
+readable, but there is no reason to lose the rest of the extraction text.
 
 ## Testing
 

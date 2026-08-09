@@ -4,11 +4,14 @@ Everything here is a property of a function, not of a database, so none of it
 needs FalkorDB. The behaviours that DO need a server — labels applied without
 ``apoc.create.addLabels``, edges merged without ``apoc.merge.relationship`` —
 live in ``test_port_delta.py``.
+
+📌 ``serialize_properties`` used to be covered here. Stage A3 moved it to
+``test_coercion.py`` along with the rest of the coercion layer, so the store's
+rules and the tests asserting them stay in one place.
 """
 
 from __future__ import annotations
 
-import json
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -54,7 +57,11 @@ def test_quote_survives_names_that_are_not_bare_identifiers():
 
 def test_quote_drops_backticks_because_falkordb_cannot_escape_them():
     """🚨 The injection surface. FalkorDB has no escape for a backtick inside a
-    quoted identifier, so it is removed rather than passed through."""
+    quoted identifier, so it is removed rather than passed through.
+
+    (``_quote`` also strips NUL — that is a coercion rule rather than an
+    injection one, so it is asserted in ``test_coercion.py``.)
+    """
     assert _quote("evil`) MATCH (n) DETACH DELETE n //") == (
         "`evil) MATCH (n) DETACH DELETE n //`"
     )
@@ -94,52 +101,6 @@ def test_components_ignores_edges_to_unknown_nodes():
 
 def test_components_of_empty_graph_is_empty():
     assert _connected_components([], []) == []
-
-
-# ----------------------------------------------------------------------
-# serialize_properties — what FalkorDB will and will not store
-# ----------------------------------------------------------------------
-
-
-def test_uuid_is_stringified(adapter):
-    node_id = uuid4()
-    assert adapter.serialize_properties({"id": node_id}) == {"id": str(node_id)}
-
-
-def test_map_is_json_encoded_under_its_own_key(adapter):
-    """🚨 FalkorDB rejects a map property outright, so it must not reach the write.
-
-    Encoded under the SAME key, unlike the Neo4j seed's edge path which renames
-    it to ``<key>_json`` — a rename makes the property invisible to anything
-    looking it up by name, including ``_indexed_fields_from_properties``.
-    """
-    out = adapter.serialize_properties({"metadata": {"index_fields": ["name"]}})
-    assert json.loads(out["metadata"]) == {"index_fields": ["name"]}
-
-
-def test_array_of_primitives_is_passed_through(adapter):
-    """FalkorDB stores these natively; JSON-encoding them would lose queryability."""
-    assert adapter.serialize_properties({"belongs_to_set": ["a", "b"]}) == {
-        "belongs_to_set": ["a", "b"]
-    }
-
-
-def test_array_containing_a_map_is_json_encoded(adapter):
-    out = adapter.serialize_properties({"items": [{"a": 1}]})
-    assert json.loads(out["items"]) == [{"a": 1}]
-
-
-def test_weights_are_flattened_not_encoded(adapter):
-    """cognee's visualization preprocessor reads ``weight_<name>`` scalars."""
-    assert adapter.serialize_properties({"weights": {"trust": 0.5}}) == {"weight_trust": 0.5}
-
-
-def test_none_still_passes_through_until_a3(adapter):
-    """⚠ Deliberate, and deliberately asserted: FalkorDB ACCEPTS a null property
-    value and then silently DROPS it. Stripping nulls before the write is stage
-    A3's gate, so this assertion is what makes that change visible rather than
-    incidental."""
-    assert adapter.serialize_properties({"nothing": None}) == {"nothing": None}
 
 
 # ----------------------------------------------------------------------
