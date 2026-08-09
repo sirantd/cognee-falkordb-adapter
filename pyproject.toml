@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cognee-falkordb-adapter"
+version = "0.1.0"
+description = "A provenance-complete FalkorDB graph adapter for cognee"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+dependencies = [
+  "falkordb>=1.6.2,<2",
+  # 🚨 PIN, DO NOT RELAX. falkordb-py's async FalkorDB.__init__ calls
+  # Is_Cluster(), which copies the ASYNC pool's connection_kwargs into a SYNC
+  # redis.Redis(**kwargs). At redis 8.1.0 those kwargs carry `himport_registry`,
+  # which sync Redis rejects:
+  #     TypeError: Redis.__init__() got an unexpected keyword argument 'himport_registry'
+  # It fires in the constructor, before any connection, so the adapter cannot be
+  # built at all — every cognify, recall and delete fails identically.
+  #
+  # ⚠ Measured 2026-08-09 against falkordb 1.6.2, and it CONTRADICTS the note in
+  # the #68 spike findings calling this pin "graphiti-specific". It is not: it is
+  # a property of falkordb-py's async client, which is the client this adapter
+  # uses. Verified both directions — 8.1.0 raises, 8.0.0 constructs cleanly, and
+  # `from_url` is affected exactly like the keyword constructor. The SYNC client
+  # is unaffected, which is the likely reason the spike's probe missed it.
+  "redis>=8.0.0,<8.1.0",
+]
+
+[project.optional-dependencies]
+# cognee is a peer, not a runtime dependency: the adapter is installed INTO a
+# cognee image that already provides it. Pinned exactly for tests because the
+# graph interface has moved twice in four months and the contract suite is our
+# only drift detector.
+test = [
+  "cognee==1.4.1",
+  "pytest>=8",
+  "pytest-asyncio>=0.24",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cognee_falkordb_adapter"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+  "integration: needs a live FalkorDB (FALKORDB_HOST / FALKORDB_PORT)",
+]

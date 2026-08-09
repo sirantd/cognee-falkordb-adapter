@@ -1,0 +1,59 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  surface:
+    # The cheap gate: abstract coverage and signature drift against the pinned
+    # cognee. Needs no server, so it must never be gated behind one.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e '.[test]'
+      - run: pytest -s tests/test_surface.py
+
+  contract:
+    # The real gate: cognee's own backend-neutral graph-provenance contract
+    # suite, run against a live FalkorDB. Wired up in stage A5 — until then this
+    # job proves the service container and the cognee install work.
+    runs-on: ubuntu-latest
+    services:
+      falkordb:
+        image: falkordb/falkordb:v4.20.1
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      GRAPH_DATABASE_PROVIDER: falkordb
+      FALKORDB_HOST: 127.0.0.1
+      FALKORDB_PORT: "6379"
+      # Guards the graph-only registration: the adapter refuses to load if
+      # anything has pointed the vector store at FalkorDB.
+      VECTOR_DB_PROVIDER: pgvector
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e '.[test]'
+      - name: redis pin holds
+        # Regression guard for the himport_registry trap. If a transitive bump
+        # pulls redis >= 8.1.0 the adapter cannot construct at all, and the
+        # failure otherwise appears as an unrelated TypeError deep in a test.
+        run: |
+          python -c "
+          import importlib.metadata as md
+          v = tuple(int(p) for p in md.version('redis').split('.')[:2])
+          assert v < (8, 1), f'redis {md.version(\"redis\")} breaks falkordb async construction'
+          print('redis', md.version('redis'), 'ok')
+          "
+      - run: pytest -m integration -v
