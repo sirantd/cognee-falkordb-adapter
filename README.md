@@ -16,16 +16,41 @@ not a production adapter.
 
 ## Status
 
-**Stage A4 — the adapter is code-complete.** All 41 methods are implemented (the
+**Stage A5 — stage A is complete.** All 41 methods are implemented (the
 burn-down, `pytest -s`, reads `0/41`), ported from cognee's in-core Neo4j adapter
 with APOC replaced, the GDS block dropped, and the two `*_node_truth_state`
 methods taken from ladybug. `coercion.py` decides what reaches the store, and
 every rule in it is a measurement — see [Coercion](#coercion). Every id lookup is
 plan-verified index-backed — see [Indexes](#indexes).
 
-cognee's own provenance contract suite passes **19/19** against a live FalkorDB.
-Wiring that into CI — and pinning the cognee version it came from — is stage A5;
-until then it is verified by hand, not by a gate.
+cognee's own provenance contract suite passes **19/19** against a live FalkorDB —
+now as a CI gate rather than by hand. See [The contract gate](#the-contract-gate).
+
+## The contract gate
+
+The definition of done for provenance is cognee's own backend-neutral suite,
+`cognee/tests/integration/infrastructure/graph/test_graph_provenance_adapter_contract.py`,
+whose docstring invites a new backend to add itself to the
+`graph_provenance_adapter` fixture. `tests/test_contract.py` does that by
+**importing the suite and shadowing that one fixture** — not by editing cognee,
+which ships the suite inside its wheel where an edit would be unversioned,
+invisible in review and wiped by the next `pip install`.
+
+Three things keep the gate from passing vacuously:
+
+- **A skipped gate is a green gate.** The fixture skips when nothing answers on
+  `FALKORDB_HOST:FALKORDB_PORT` — correct on a laptop, a false pass in CI, where
+  19 skips read as 19 passes. CI sets `FALKORDB_REQUIRED=1` and the same fixture
+  fails instead. Verified both ways against a dead port.
+- **The suite is only a drift detector while cognee is pinned.** `1.4.1`, exactly,
+  and `tests/test_contract_pin.py` asserts the pin is exact, that the installed
+  cognee is that pin, and that the suite still holds the same **19 cases by name**
+  — so an upgrade fails here first and the diff has to be read, rather than
+  arriving as a cognify failure in the 03:00 drain.
+- **The shadow has to actually take.** Without the override the suite runs its own
+  ladybug/postgres/neo4j params; ladybug is installed, so it would pass green
+  having tested a different backend. A test asserts the fixture is ours and the
+  19 test functions are cognee's, unmodified.
 
 ## Indexes
 
@@ -115,11 +140,12 @@ readable, but there is no reason to lose the rest of the extraction text.
 
 ```bash
 pip install -e '.[test]'
-pytest -s -m "not integration"           # surface, signature drift, port helpers — no server
+pytest -s -m "not integration"           # surface, signatures, port helpers, the pin — no server
 docker run -d --rm -p 6379:6379 falkordb/falkordb:v4.20.1
-pytest -m integration                    # the port delta, against a live server
+pytest -m integration                    # port delta, indexes and the contract suite
+FALKORDB_REQUIRED=1 pytest tests/test_contract.py -v   # the gate, as CI runs it
 ```
 
-The real gate is cognee's own backend-neutral provenance contract suite
-(`cognee/tests/integration/infrastructure/graph/test_graph_provenance_adapter_contract.py`),
-whose fixture this adapter registers against. Its docstring invites exactly that.
+`FALKORDB_REQUIRED=1` turns "no server" from a skip into a failure. Use it
+whenever a green run is meant to be evidence — see
+[The contract gate](#the-contract-gate).
