@@ -27,7 +27,12 @@ jobs:
     runs-on: ubuntu-latest
     services:
       falkordb:
-        image: falkordb/falkordb:v4.20.1
+        # 🚨 Track the deployed store's pin (homelab
+        # roles/truenas-falkordb/defaults/main.yml: falkordb_image). A gate that
+        # blesses the adapter against a FalkorDB nobody runs is a weaker claim
+        # than it reads as — the point of this job is "works against
+        # PRODUCTION's store", not "works against some FalkorDB".
+        image: falkordb/falkordb:v4.20.3
         ports: ["6379:6379"]
         options: >-
           --health-cmd "redis-cli ping"
