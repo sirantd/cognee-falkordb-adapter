@@ -44,14 +44,27 @@ RUNTIME_REACHED = frozenset(
 # correction has a test behind it: the build target is 41 methods, not 40.
 MUST_OVERRIDE_A_REAL_DEFAULT = frozenset({"remove_belongs_to_set_tags"})
 
-# Reached by NOTHING in cognee's runtime — left inheriting the raising default on
-# purpose. Asserted explicitly so that "we skipped these" stays a decision with a
-# test behind it rather than an oversight nobody notices.
+# Left inheriting the raising default on purpose. Asserted explicitly so that "we
+# skipped these" stays a decision with a test behind it rather than an oversight
+# nobody notices — which is the whole reason this set is a closed list and not a
+# comment.
+#
+# The eight weight methods are reached by NOTHING in cognee's runtime.
+#
+# `update_node` (added to the interface in cognee 1.5.0) is the one entry with a
+# caller: `cognee/tasks/storage/close_node.py`, the bi-temporal "stamp valid_to"
+# helper. It is safe to leave raising because that caller CATCHES
+# NotImplementedError, logs a warning and returns False — and because nothing on
+# the cognify, recall or delete path calls close_node at all (only a docstring in
+# DataPoint.py references it). Upstream declares it an "optional extension" for
+# exactly this reason. 💡 If a caller ever lands on the cognify path, implement it
+# as a read-modify-write MERGE and move it into RUNTIME_REACHED.
 DELIBERATELY_UNIMPLEMENTED = frozenset(
     """
     get_edge_feedback_weights get_edge_frequency_weights get_node_feedback_weights
     get_node_frequency_weights set_edge_feedback_weights set_edge_frequency_weights
     set_node_feedback_weights set_node_frequency_weights
+    update_node
     """.split()
 )
 
@@ -90,7 +103,7 @@ def test_target_surface_is_defined_on_the_adapter():
 
 
 def test_weight_surface_is_left_inherited_on_purpose():
-    """The 8 unreached methods must NOT be implemented — see the spec."""
+    """The deliberately-unimplemented methods must NOT be implemented — see the spec."""
     own = set()
     for klass in FalkorDBAdapter.__mro__:
         if klass is GraphDBInterface:
