@@ -35,7 +35,7 @@ dependencies = [
 # graph interface has moved twice in four months and the contract suite is our
 # only drift detector.
 test = [
-  "cognee==1.5.0",
+  "cognee==1.5.1",
   "pytest>=8",
   "pytest-asyncio>=0.24",
 ]
