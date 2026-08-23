@@ -32,7 +32,7 @@ jobs:
         # blesses the adapter against a FalkorDB nobody runs is a weaker claim
         # than it reads as — the point of this job is "works against
         # PRODUCTION's store", not "works against some FalkorDB".
-        image: falkordb/falkordb:v4.20.3
+        image: falkordb/falkordb:v4.20.4
         ports: ["6379:6379"]
         options: >-
           --health-cmd "redis-cli ping"
