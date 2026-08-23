@@ -40,10 +40,10 @@ dependencies = [
 # structured-output path, not the graph layer. Nothing under
 # cognee/infrastructure/databases/graph/ moved, so all 7 coupled symbols and
 # GraphDBInterface's 21 abstractmethods are byte-identical to 1.5.1.
-# ⚠ This pin is therefore ASSERTED, not MEASURED: the 19/19 provenance contract
-# suite has NOT been re-run against a live FalkorDB at 1.5.2 (that is how #2/#3
-# were gated). Run it before the matching cognee_image bump is DEPLOYED:
-#   FALKORDB_REQUIRED=1 FALKORDB_HOST=... FALKORDB_PORT=... pytest
+# ✅ MEASURED, not asserted: ci's `contract` job gates this pin the way #2 and #3
+# were gated - cognee 1.5.2 installed, a live FalkorDB service, 19 passed with
+# FALKORDB_REQUIRED=1 so skips cannot read green. The note in #4 calling this
+# pin unmeasured was wrong and is corrected here.
 test = [
   "cognee==1.5.2",
   "pytest>=8",
