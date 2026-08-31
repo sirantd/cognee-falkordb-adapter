@@ -125,7 +125,8 @@ def test_signature_does_not_narrow_the_interface(name):
 
     Not exact equality — cognee's own adapters do not match the interface
     literally, and requiring it would be a test of a convention nobody follows.
-    Measured against 1.4.1: `query(self, query, params)` on the interface becomes
+    Measured against 1.4.1 (not re-measured against the 1.5.2 pin):
+    `query(self, query, params)` on the interface becomes
     `params=None` on Neo4j, ladybug AND Postgres, and Postgres additionally
     renames the first parameter to `query_str`.
 
