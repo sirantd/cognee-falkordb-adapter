@@ -16,7 +16,9 @@ not a production adapter.
 
 ## Status
 
-**Stage B2 — deployable.** All 41 methods are implemented (the burn-down,
+**Production — deployed and serving.** The TrueNAS deployment pins this
+adapter at commit `f61fbff` under cognee `1.5.2`. All 41 methods are implemented
+(the burn-down,
 `pytest -s`, reads `0/41`), ported from cognee's in-core Neo4j adapter with APOC
 replaced, the GDS block dropped, and the two `*_node_truth_state` methods taken
 from ladybug. `coercion.py` decides what reaches the store, and every rule in it
@@ -70,7 +72,7 @@ Three things keep the gate from passing vacuously:
   `FALKORDB_HOST:FALKORDB_PORT` — correct on a laptop, a false pass in CI, where
   19 skips read as 19 passes. CI sets `FALKORDB_REQUIRED=1` and the same fixture
   fails instead. Verified both ways against a dead port.
-- **The suite is only a drift detector while cognee is pinned.** `1.4.1`, exactly,
+- **The suite is only a drift detector while cognee is pinned.** `1.5.2`, exactly,
   and `tests/test_contract_pin.py` asserts the pin is exact, that the installed
   cognee is that pin, and that the suite still holds the same **19 cases by name**
   — so an upgrade fails here first and the diff has to be read, rather than
@@ -104,7 +106,9 @@ degrades to `Node By Label Scan`.
 
 ## Scope: 41 methods, not 48
 
-`GraphDBInterface` declares 48 public methods. Measured against cognee 1.4.1:
+`GraphDBInterface` declares 48 public methods. Counted against cognee 1.4.1 and
+**not re-counted against the current 1.5.2 pin** — `test_surface.py` is what
+would catch a change in the interface, not this table:
 
 | bucket | count | implemented here |
 |---|---|---|
