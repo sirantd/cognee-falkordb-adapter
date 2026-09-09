@@ -11,22 +11,28 @@ requires-python = ">=3.11"
 license = { text = "MIT" }
 
 dependencies = [
-  "falkordb>=1.6.2,<2",
-  # 🚨 PIN, DO NOT RELAX. falkordb-py's async FalkorDB.__init__ calls
-  # Is_Cluster(), which copies the ASYNC pool's connection_kwargs into a SYNC
-  # redis.Redis(**kwargs). At redis 8.1.0 those kwargs carry `himport_registry`,
-  # which sync Redis rejects:
+  # 🚨 FLOOR IS LOAD-BEARING, and it is what lets the redis pin below be a range.
+  # falkordb-py < 1.7.0's async FalkorDB.__init__ calls Is_Cluster(), which copies
+  # the ASYNC pool's connection_kwargs into a SYNC redis.Redis(**kwargs). At redis
+  # 8.1.0 those kwargs carry `himport_registry`, which sync Redis rejects:
   #     TypeError: Redis.__init__() got an unexpected keyword argument 'himport_registry'
   # It fires in the constructor, before any connection, so the adapter cannot be
   # built at all — every cognify, recall and delete fails identically.
   #
-  # ⚠ Measured 2026-08-09 against falkordb 1.6.2, and it CONTRADICTS the note in
-  # the #68 spike findings calling this pin "graphiti-specific". It is not: it is
-  # a property of falkordb-py's async client, which is the client this adapter
-  # uses. Verified both directions — 8.1.0 raises, 8.0.0 constructs cleanly, and
-  # `from_url` is affected exactly like the keyword constructor. The SYNC client
-  # is unaffected, which is the likely reason the spike's probe missed it.
-  "redis>=8.0.0,<8.1.0",
+  # falkordb-py 1.7.0 fixed it at the source, filtering connection_kwargs through
+  # inspect.signature(sync_redis.Redis.__init__) before forwarding them. So the
+  # constraint is not "redis < 8.1" — it is "falkordb >= 1.7.0 OR redis < 8.1",
+  # and raising the floor is the honest half to pin: it is where the fix lives.
+  # Dropping this floor back below 1.7.0 silently re-arms the trap.
+  "falkordb>=1.7.0,<2",
+  # ⚠ Measured 2026-09-09, replacing a `<8.1.0` pin measured 2026-08-09 against
+  # falkordb 1.6.2 — that measurement was right for its time and is simply stale:
+  # `>=1.6.2` is a floor, so CI had already been resolving falkordb 1.7.1 for a
+  # while. Verified both directions on the constructor AND `from_url`:
+  #   falkordb 1.6.2 + redis 8.1.0 -> TypeError, both entry points
+  #   falkordb 1.7.1 + redis 8.1.0 -> constructs; 19 contract + 60 integration green
+  # The upper bound is falkordb 1.7.1's own cap (redis<9), not a guess.
+  "redis>=8.0.0,<9",
 ]
 
 [project.optional-dependencies]
