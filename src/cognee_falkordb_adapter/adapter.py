@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import nullcontext
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Type, Union
 from uuid import UUID
 
@@ -549,25 +550,43 @@ class FalkorDBAdapter(GraphDBInterface):
         for entry in deduped.values():
             by_label.setdefault(entry["label"], []).append(entry)
 
-        for label, batch in by_label.items():
-            label_clause = f"SET n:{_quote(label)}" if label else ""
-            query = f"""
-            UNWIND $nodes AS node
-            MERGE (n:{_quote(BASE_LABEL)} {{id: node.node_id}})
-            {label_clause}
-            WITH n, node,
-                 coalesce(n.belongs_to_set, []) AS existing_tags,
-                 coalesce(n.source_ref_keys, []) AS prov_keys_before
-            WITH n, node, prov_keys_before,
-                 existing_tags
-                 + [tag IN coalesce(node.properties.belongs_to_set, [])
-                    WHERE NOT tag IN existing_tags] AS merged_belongs_to_set
-            SET n += node.properties, n.updated_at = timestamp()
-            SET n.belongs_to_set = merged_belongs_to_set
-            {fold_clause}
-            RETURN n.id AS node_id
-            """
-            await self.query(query, {"nodes": batch, **provenance_params})
+        # 🚨 **A folded write takes the attach/remove lock.** The fold below stamps
+        # the owner key inside the MERGE — atomic on its own — but
+        # ``attach_*_source_refs`` / ``remove_*_source_refs`` are a read-then-write
+        # pair serialized by ``_source_ref_change_lock``. A fold committing between
+        # their read and their write is overwritten, and the owner it stamped is
+        # silently gone. That is what two documents of one cognify run do to an
+        # entity they share.
+        #
+        # ⚠ Held across **every label group**, not per statement: the batch is split
+        # by label (the APOC port, see below), and a lock released between groups
+        # would leave exactly the same window open for the groups that follow.
+        #
+        # 📌 Ported from cognee 1.5.4, which fixed this in its own neo4j and ladybug
+        # adapters the same way. Its 20th contract case
+        # (``test_concurrent_folded_writes_and_attaches_keep_every_owner``) is the
+        # upstream gate; ``tests/test_provenance_race.py`` is ours until the pin moves.
+        fold_lock = self._source_ref_change_lock if source_ref_key is not None else nullcontext()
+        async with fold_lock:
+            for label, batch in by_label.items():
+                label_clause = f"SET n:{_quote(label)}" if label else ""
+                query = f"""
+                UNWIND $nodes AS node
+                MERGE (n:{_quote(BASE_LABEL)} {{id: node.node_id}})
+                {label_clause}
+                WITH n, node,
+                     coalesce(n.belongs_to_set, []) AS existing_tags,
+                     coalesce(n.source_ref_keys, []) AS prov_keys_before
+                WITH n, node, prov_keys_before,
+                     existing_tags
+                     + [tag IN coalesce(node.properties.belongs_to_set, [])
+                        WHERE NOT tag IN existing_tags] AS merged_belongs_to_set
+                SET n += node.properties, n.updated_at = timestamp()
+                SET n.belongs_to_set = merged_belongs_to_set
+                {fold_clause}
+                RETURN n.id AS node_id
+                """
+                await self.query(query, {"nodes": batch, **provenance_params})
 
     async def delete_node(self, node_id: str) -> None:
         """Delete one node and its relationships."""
@@ -761,20 +780,26 @@ class FalkorDBAdapter(GraphDBInterface):
                 }
             )
 
-        for relationship_name, batch in by_type.items():
-            query = f"""
-            UNWIND $edges AS edge
-            MATCH (from_node:{_quote(BASE_LABEL)} {{id: edge.from_node}})
-            MATCH (to_node:{_quote(BASE_LABEL)} {{id: edge.to_node}})
-            MERGE (from_node)-[rel:{_quote(relationship_name)}]->(to_node)
-            WITH rel, edge, coalesce(rel.source_ref_keys, []) AS prov_keys_before
-            SET rel += edge.properties,
-                rel.updated_at = timestamp(),
-                rel.created_at = coalesce(rel.created_at, timestamp())
-            {fold_clause}
-            RETURN type(rel) AS relationship_name
-            """
-            await self.query(query, {"edges": batch, **provenance_params})
+        # Same serialization as ``add_nodes``, and for the same reason: a folded
+        # edge write races ``attach_edge_source_refs`` / ``remove_edge_source_refs``
+        # exactly as the node fold races their node counterparts. Held across every
+        # relationship-type group.
+        fold_lock = self._source_ref_change_lock if source_ref_key is not None else nullcontext()
+        async with fold_lock:
+            for relationship_name, batch in by_type.items():
+                query = f"""
+                UNWIND $edges AS edge
+                MATCH (from_node:{_quote(BASE_LABEL)} {{id: edge.from_node}})
+                MATCH (to_node:{_quote(BASE_LABEL)} {{id: edge.to_node}})
+                MERGE (from_node)-[rel:{_quote(relationship_name)}]->(to_node)
+                WITH rel, edge, coalesce(rel.source_ref_keys, []) AS prov_keys_before
+                SET rel += edge.properties,
+                    rel.updated_at = timestamp(),
+                    rel.created_at = coalesce(rel.created_at, timestamp())
+                {fold_clause}
+                RETURN type(rel) AS relationship_name
+                """
+                await self.query(query, {"edges": batch, **provenance_params})
 
     async def has_edge(self, source_id: str, target_id: str, relationship_name: str) -> bool:
         """Return True when this exact edge exists.
@@ -961,8 +986,17 @@ class FalkorDBAdapter(GraphDBInterface):
         """Read each artifact's provenance, apply a pure transition, write it back.
 
         Shared by attach/remove for both nodes and edges. The lock serializes the
-        read-modify-write within one adapter instance so concurrent explicit
-        attach/remove calls do not overwrite each other's provenance updates.
+        read-modify-write so concurrent provenance writers do not overwrite each
+        other's updates — and since ``add_nodes`` / ``add_edges`` now take the same
+        lock whenever they fold an owner key, that covers folds too, not just
+        explicit attach/remove.
+
+        ⚠ **The guarantee is per adapter instance.** ``asyncio.Lock`` serializes
+        coroutines sharing one instance; it does nothing across processes, or across
+        two adapters pointed at one graph. Closing that would mean moving the whole
+        transition server-side into a single statement (as the fold clause already
+        is) — the read-then-write shape is what makes the lock necessary at all.
+        cognee's own adapters carry the same limitation and the same lock.
         """
         if not artifacts:
             return
