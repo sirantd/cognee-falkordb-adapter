@@ -35,17 +35,29 @@ dependencies = [
 # graph interface has moved twice in four months and the contract suite is our
 # only drift detector.
 #
-# 📌 1.5.1 -> 1.5.2 is ONE substantive commit (COG-6271, #4621) and it lands in
-# cognee/infrastructure/llm/structured_output_framework/ - the LLM
-# structured-output path, not the graph layer. Nothing under
-# cognee/infrastructure/databases/graph/ moved, so all 7 coupled symbols and
-# GraphDBInterface's 21 abstractmethods are byte-identical to 1.5.1.
-# ✅ MEASURED, not asserted: ci's `contract` job gates this pin the way #2 and #3
-# were gated - cognee 1.5.2 installed, a live FalkorDB service, 19 passed with
-# FALKORDB_REQUIRED=1 so skips cannot read green. The note in #4 calling this
-# pin unmeasured was wrong and is corrected here.
+# 📌 1.5.2 -> 1.5.4 is the first bump in this series that is NOT interface-inert,
+# and the census is what caught it. GraphDBInterface's 21 abstractmethods and
+# their signatures are still byte-identical, but two other things moved:
+#
+#   1. The contract suite grew 19 -> 20. The new case,
+#      test_concurrent_folded_writes_and_attaches_keep_every_owner, is real new
+#      required behaviour: it catches a fold racing attach into lost owner keys.
+#      This adapter FAILED it (7-10 of 24 keys lost per run) until #7 fixed the
+#      race. The bump was blocked on that fix, not the other way round.
+#   2. GraphDBInterface gained two opt-in capability flags
+#      (supports_per_row_source_refs, supports_incremental_chunk_updates, both
+#      defaulting False) and a non-abstract update_chunk_index that RAISES
+#      UnsupportedGraphOperation unless overridden. Inheriting all three is safe
+#      and deliberate here - unlike remove_belongs_to_set_tags, whose interface
+#      default is a silent no-op, these fail loudly or stay switched off. Adopting
+#      either capability is a feature decision, not a gate.
+#
+# ✅ MEASURED, not asserted: ci's `contract` job gates this pin - cognee 1.5.4
+# installed, a live FalkorDB service, 20 passed with FALKORDB_REQUIRED=1 so skips
+# cannot read green. 1.5.3 is skipped deliberately: it still carries 19 cases, so
+# it would re-gate green without proving anything the 1.5.2 pin did not.
 test = [
-  "cognee==1.5.2",
+  "cognee==1.5.4",
   "pytest>=8",
   "pytest-asyncio>=0.24",
 ]

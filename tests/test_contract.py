@@ -11,7 +11,7 @@ this:
 by editing cognee.** The suite ships inside the cognee wheel, so an edited copy
 would live in ``site-packages``: unversioned, silently reverted by the next
 ``pip install``, and invisible in review. The star-import below binds the same
-19 test functions into this module, where pytest collects them and resolves
+20 test functions into this module, where pytest collects them and resolves
 ``graph_provenance_adapter`` against the definition here. Adding ``falkordb`` to
 cognee's own fixture params is a PR to cognee; this repo's job is to prove the
 provider passes.
@@ -19,7 +19,7 @@ provider passes.
 ⚠ **The suite is only a gate while the cognee it came from is pinned.** A
 hand-run suite proves today's cognee; a pinned one in CI is what catches the
 interface moving. ``pyproject.toml`` pins it exactly and ``test_contract_pin.py``
-enforces both that pin and the 19 names, so drift surfaces here as a failing
+enforces both that pin and the 20 names, so drift surfaces here as a failing
 test instead of as a cognify failure in the 03:00 drain.
 """
 
@@ -30,7 +30,7 @@ import uuid
 
 import pytest
 
-# The suite itself. Star-import is the mechanism: it is what puts the 19 test
+# The suite itself. Star-import is the mechanism: it is what puts the 20 test
 # functions in this module's namespace for pytest to collect, and what lets the
 # fixture below shadow the suite's by name.
 from cognee.tests.integration.infrastructure.graph.test_graph_provenance_adapter_contract import *  # noqa: F401,F403
@@ -46,7 +46,7 @@ HOST = os.getenv("FALKORDB_HOST", "127.0.0.1")
 PORT = int(os.getenv("FALKORDB_PORT", "6379"))
 
 # 🚨 **A skipped gate is a green gate.** With no server reachable the fixture
-# skips — right on a laptop, a false pass in CI, where 19 skips read as 19
+# skips — right on a laptop, a false pass in CI, where 20 skips read as 20
 # passes in the job summary and the one check this whole stage exists for
 # quietly stops running. CI sets ``FALKORDB_REQUIRED=1`` so an unreachable
 # server fails instead.

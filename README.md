@@ -25,8 +25,14 @@ from ladybug. `coercion.py` decides what reaches the store, and every rule in it
 is a measurement — see [Coercion](#coercion). Every id lookup is plan-verified
 index-backed — see [Indexes](#indexes).
 
-cognee's own provenance contract suite passes **19/19** against a live FalkorDB —
+cognee's own provenance contract suite passes **20/20** against a live FalkorDB —
 now as a CI gate rather than by hand. See [The contract gate](#the-contract-gate).
+
+⚠ **The deployed commit predates the provenance race fix.** `f61fbff` is behind
+`main`: it does not carry the fold-vs-attach fix, so the store it serves can still
+lose owner keys when two documents of one cognify run write a shared entity. The
+gate pin is also ahead of the deployment now — CI runs cognee `1.5.4`, production
+runs `1.5.2`. Both close on the next redeploy; neither is a defect in this repo.
 
 ## cognee constructs this, and it does not use your keyword names
 
@@ -70,17 +76,17 @@ Three things keep the gate from passing vacuously:
 
 - **A skipped gate is a green gate.** The fixture skips when nothing answers on
   `FALKORDB_HOST:FALKORDB_PORT` — correct on a laptop, a false pass in CI, where
-  19 skips read as 19 passes. CI sets `FALKORDB_REQUIRED=1` and the same fixture
+  20 skips read as 20 passes. CI sets `FALKORDB_REQUIRED=1` and the same fixture
   fails instead. Verified both ways against a dead port.
-- **The suite is only a drift detector while cognee is pinned.** `1.5.2`, exactly,
+- **The suite is only a drift detector while cognee is pinned.** `1.5.4`, exactly,
   and `tests/test_contract_pin.py` asserts the pin is exact, that the installed
-  cognee is that pin, and that the suite still holds the same **19 cases by name**
+  cognee is that pin, and that the suite still holds the same **20 cases by name**
   — so an upgrade fails here first and the diff has to be read, rather than
   arriving as a cognify failure in the 03:00 drain.
 - **The shadow has to actually take.** Without the override the suite runs its own
   ladybug/postgres/neo4j params; ladybug is installed, so it would pass green
   having tested a different backend. A test asserts the fixture is ours and the
-  19 test functions are cognee's, unmodified.
+  20 test functions are cognee's, unmodified.
 
 ## Indexes
 
@@ -107,7 +113,7 @@ degrades to `Node By Label Scan`.
 ## Scope: 41 methods, not 48
 
 `GraphDBInterface` declares 48 public methods. Counted against cognee 1.4.1 and
-**not re-counted against the current 1.5.2 pin** — `test_surface.py` is what
+**not re-counted against the current 1.5.4 pin** — `test_surface.py` is what
 would catch a change in the interface, not this table:
 
 | bucket | count | implemented here |
