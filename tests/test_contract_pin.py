@@ -3,13 +3,13 @@
 ``test_contract.py`` proves the adapter satisfies cognee's provenance contract.
 That proof is worth exactly as much as the cognee it ran against is fixed:
 the graph interface has moved twice in four months, and an unpinned suite tests
-whatever pip resolved that morning while still reporting 19 green.
+whatever pip resolved that morning while still reporting 20 green.
 
 So three things are asserted here, all server-free:
 
 * the test extra pins cognee **exactly** (``==``, not a range),
 * the installed cognee **is** that pin,
-* the suite still holds the **same 19 cases**, by name, and the gate module
+* the suite still holds the **same 20 cases**, by name, and the gate module
   really did shadow the fixture rather than inherit the suite's own providers.
 
 📌 The census is the part that catches a *deliberate* upgrade. Bumping the pin
@@ -33,7 +33,7 @@ import test_contract as gate
 PYPROJECT = Path(__file__).resolve().parents[1] / "pyproject.toml"
 
 # The suite as of the pinned cognee. Frozen on purpose: this list is the
-# difference between "19 tests passed" and "the 19 tests we signed off passed".
+# difference between "20 tests passed" and "the 20 tests we signed off passed".
 CONTRACT_TESTS = frozenset(
     """
     test_add_edges_folds_multiple_owners
@@ -43,6 +43,7 @@ CONTRACT_TESTS = frozenset(
     test_attach_without_pipeline_run_is_not_rollbackable_by_run
     test_concurrent_explicit_attach_keeps_all_keys
     test_concurrent_folded_attach_keeps_all_keys
+    test_concurrent_folded_writes_and_attaches_keep_every_owner
     test_delete_edge_triples_preserves_endpoints
     test_edge_provenance_snapshot_and_lookups
     test_folded_attach_omitted_when_no_source_ref
@@ -91,10 +92,10 @@ def test_the_installed_cognee_is_the_pinned_one():
 
 
 def test_the_contract_suite_is_the_one_we_signed_off():
-    """🚨 19 cases, by name. A rename shrinks coverage without failing anything."""
+    """🚨 20 cases, by name. A rename shrinks coverage without failing anything."""
     found = frozenset(name for name in vars(upstream) if name.startswith("test_"))
 
-    assert len(CONTRACT_TESTS) == 19
+    assert len(CONTRACT_TESTS) == 20
     assert found == CONTRACT_TESTS, (
         "cognee's provenance contract suite has changed under the pin.\n"
         f"  added:   {sorted(found - CONTRACT_TESTS)}\n"
@@ -105,7 +106,7 @@ def test_the_contract_suite_is_the_one_we_signed_off():
 
 
 def test_the_gate_module_collects_every_contract_test():
-    """The star-import is load-bearing; assert it actually bound all 19."""
+    """The star-import is load-bearing; assert it actually bound all 20."""
     missing = sorted(CONTRACT_TESTS - frozenset(vars(gate)))
     assert not missing, f"not collected by tests/test_contract.py: {missing}"
 

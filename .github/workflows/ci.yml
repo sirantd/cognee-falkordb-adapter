@@ -23,7 +23,7 @@ jobs:
 
   contract:
     # The real gate (stage A5): cognee's own backend-neutral graph-provenance
-    # contract suite — all 19 cases, unmodified — run against a live FalkorDB.
+    # contract suite — all 20 cases, unmodified — run against a live FalkorDB.
     runs-on: ubuntu-latest
     services:
       falkordb:
@@ -44,8 +44,8 @@ jobs:
       FALKORDB_HOST: 127.0.0.1
       FALKORDB_PORT: "6379"
       # 🚨 A skipped gate is a green gate. The contract fixture skips when no
-      # server answers, which is right on a laptop and a false pass here — 19
-      # skips read as 19 passes in the job summary. This makes it fail instead.
+      # server answers, which is right on a laptop and a false pass here — 20
+      # skips read as 20 passes in the job summary. This makes it fail instead.
       FALKORDB_REQUIRED: "1"
       # Guards the graph-only registration: the adapter refuses to load if
       # anything has pointed the vector store at FalkorDB.
@@ -69,7 +69,7 @@ jobs:
           "
       - name: cognee provenance contract suite — the A5 gate
         # Its own step so a red build says which half broke: cognee's contract,
-        # or our port delta. Expect "19 passed"; the census in the surface job
+        # or our port delta. Expect "20 passed"; the census in the surface job
         # is what keeps that number honest.
         run: pytest tests/test_contract.py -v
       - name: adapter integration tests

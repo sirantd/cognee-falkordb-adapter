@@ -1,15 +1,17 @@
 """The fold-vs-attach lost-update race, as an adapter-owned gate.
 
-📌 **Why this file exists at all.** cognee 1.5.4 adds a 20th case to the
-provenance contract suite — ``test_concurrent_folded_writes_and_attaches_keep_
-every_owner`` — that catches exactly this bug. This repo is still pinned to
-cognee 1.5.2, so CI cannot see that case yet, and a fix landing without a gate
-would be a fix nothing defends. This is the same race, owned here, running under
-the current pin.
+📌 **Why this file still exists.** It was written under the cognee 1.5.2 pin,
+where CI could not yet see the upstream case that catches this bug. The pin is
+now 1.5.4, so ``test_contract.py`` runs
+``test_concurrent_folded_writes_and_attaches_keep_every_owner`` and *that* is the
+authority for the node path.
 
-When the pin moves to 1.5.4 the upstream case becomes the authority and this
-file is the *port delta* half: it also covers the edge path, which the upstream
-case does not.
+What remains here is the **port delta**: the upstream case covers nodes only, and
+``add_edges`` folds into its MERGE exactly as ``add_nodes`` does. The edge test
+below is coverage cognee's suite does not give us. The node test is kept as the
+deliberate overlap — it is what would localize a regression to this adapter
+rather than to a cognee bump, since the two run against different code paths in
+the same store.
 
 **The race.** ``add_nodes(..., source_ref_key=...)`` folds the owner key into
 the MERGE — one statement. ``attach_node_source_refs`` is a read-then-write
@@ -81,10 +83,11 @@ async def adapter():
 def _owner_keys(dataset_id, count):
     """``count`` distinct owner keys in one dataset — one per owning data item.
 
-    📌 Deliberately ``make_source_ref_key`` (dataset/data) rather than 1.5.4's
-    chunk-scoped ``make_chunk_source_ref_key``: only the former exists under the
-    current 1.5.2 pin, and the race is about *how* keys are written, not how
-    finely they are scoped. This keeps the gate running across the pin bump.
+    📌 Still ``make_source_ref_key`` (dataset/data) rather than 1.5.4's
+    chunk-scoped ``make_chunk_source_ref_key``, now by choice rather than by
+    necessity: the race is about *how* owner keys are written, not how finely
+    they are scoped, and the coarser builder exists in both versions — so this
+    gate keeps working either side of a pin move.
     """
     return [make_source_ref_key(dataset_id, uuid4()) for _ in range(count)]
 
