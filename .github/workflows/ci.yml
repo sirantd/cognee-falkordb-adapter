@@ -56,16 +56,32 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e '.[test]'
-      - name: redis pin holds
-        # Regression guard for the himport_registry trap. If a transitive bump
-        # pulls redis >= 8.1.0 the adapter cannot construct at all, and the
-        # failure otherwise appears as an unrelated TypeError deep in a test.
+      - name: the himport_registry trap stays shut
+        # Regression guard. falkordb-py < 1.7.0 forwards the ASYNC pool's
+        # connection_kwargs into a SYNC redis.Redis(); at redis >= 8.1.0 those
+        # carry `himport_registry`, which sync Redis rejects — in the constructor,
+        # before any I/O, so every cognify, recall and delete fails identically.
+        #
+        # 📌 Asserts the BEHAVIOUR, not a version range. The previous guard
+        # asserted `redis < 8.1`, which stopped being the constraint the moment
+        # falkordb-py 1.7.0 fixed it at the source: that assert would now fail a
+        # combination this repo has measured as working. Constructing the real
+        # client cannot go stale that way — it re-derives the answer every run,
+        # whatever the resolver picked.
         run: |
           python -c "
           import importlib.metadata as md
-          v = tuple(int(p) for p in md.version('redis').split('.')[:2])
-          assert v < (8, 1), f'redis {md.version(\"redis\")} breaks falkordb async construction'
-          print('redis', md.version('redis'), 'ok')
+          from falkordb.asyncio import FalkorDB
+          print('falkordb', md.version('falkordb'), '| redis', md.version('redis'))
+          for label, build in (
+              ('keyword ctor', lambda: FalkorDB(host='127.0.0.1', port=6379)),
+              ('from_url', lambda: FalkorDB.from_url('redis://127.0.0.1:6379')),
+          ):
+              try:
+                  build()
+              except TypeError as exc:
+                  raise SystemExit(f'himport_registry trap is live via {label}: {exc}')
+              print(label, 'ok')
           "
       - name: cognee provenance contract suite — the A5 gate
         # Its own step so a red build says which half broke: cognee's contract,

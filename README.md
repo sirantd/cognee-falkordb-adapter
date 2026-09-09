@@ -135,11 +135,19 @@ pass the suite implement it, and so does this one — 41 methods, not 40.
 
 ## Three things that will bite
 
-**Pin `redis < 8.1.0`.** falkordb-py's async `FalkorDB.__init__` calls
-`Is_Cluster()`, which copies the *async* pool's `connection_kwargs` into a *sync*
-`redis.Redis(**kwargs)`. At redis 8.1.0 those carry `himport_registry`, which
-sync Redis rejects — in the constructor, before any connection, so nothing works
-at all. The sync client is unaffected, which is how this gets missed.
+**Keep `falkordb >= 1.7.0`.** falkordb-py *below* that calls `Is_Cluster()` in its
+async `FalkorDB.__init__`, which copies the *async* pool's `connection_kwargs`
+into a *sync* `redis.Redis(**kwargs)`. At redis 8.1.0 those carry
+`himport_registry`, which sync Redis rejects — in the constructor, before any
+connection, so nothing works at all. The sync client is unaffected, which is how
+this gets missed.
+
+This used to read "pin `redis < 8.1.0`", and that was the right pin until
+falkordb-py 1.7.0 fixed it at the source by filtering `connection_kwargs` through
+the sync constructor's signature. The real constraint was always
+`falkordb >= 1.7.0 OR redis < 8.1`, so the floor is the half worth pinning — it is
+where the fix lives. Drop below 1.7.0 and the trap is silently re-armed, which is
+why CI now *constructs the client* rather than asserting a redis version range.
 
 **Nothing else creates the id indexes, and the failure is silent.** An unindexed
 id lookup degrades to a full scan with no error — measured at 9.6 ms versus
