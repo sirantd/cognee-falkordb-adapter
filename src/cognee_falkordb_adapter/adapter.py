@@ -63,6 +63,7 @@ from cognee.shared.logging_utils import get_logger
 from .coercion import coerce_properties, scrub_nul
 from .constants import (
     BASE_LABEL,
+    CHUNK_LABEL,
     DEFAULT_GRAPH_NAME,
     DEFAULT_HOST,
     DEFAULT_PORT,
@@ -1281,8 +1282,13 @@ class FalkorDBAdapter(GraphDBInterface):
     # data id literally, ``source_ref:v1:{dataset_id}:{data_id}`` and
     # ``source_ref:v2:{dataset_id}:{data_id}:{chunk_id}``, written from UUID
     # objects and so canonical — the same form cognee passes as ``str(data_id)``.
-    # ``_document_refs`` then makes it exact. It is still a label scan, as the
-    # by_dataset reads are: FalkorDB cannot index list membership.
+    # ``_document_refs`` then makes it exact.
+    #
+    # Nodes: a label scan with that filter — 66 ms live. Edges: the same scan over
+    # every relationship timed out at 30 s live, so edges are ANCHORED on the
+    # document's nodes instead (index seek on ``__Node__.id``) plus a sweep of
+    # chunk<->chunk edges — see ``find_edge_source_refs_by_document`` for the
+    # invariant that makes this complete, and what it does not cover.
     #
     # No ``_source_ref_change_lock``: that serializes read-then-WRITE pairs, and
     # these are single reads, like the by_dataset lookups they replace.
@@ -1313,19 +1319,73 @@ class FalkorDBAdapter(GraphDBInterface):
     async def find_edge_source_refs_by_document(
         self, dataset_id: str, data_id: str
     ) -> dict[EdgeIdentity, list[str]]:
-        """``{edge: keys}`` for the refs one document of one dataset owns."""
+        """``{edge: keys}`` for the refs one document of one dataset owns.
+
+        Not a scan of every relationship — that timed out at 30 s on ~700k edges.
+        Two index-driven reads, unioned by ``EdgeIdentity``:
+
+        1. **Anchored**: every edge incident to a node this document owns
+           (``find_node_source_refs_by_document``), seeded by the ``__Node__.id``
+           index, in either direction, deduplicated.
+        2. **Chunk sweep**: every ``DocumentChunk -> DocumentChunk`` edge
+           (10.8 ms live).
+
+        🚨 **Complete only under an invariant of cognee's write path**: an edge
+        carrying document D's ref has an endpoint that also carries a D ref, OR
+        is chunk->chunk. Verified against cognee 1.5.4 — **re-verify on every
+        cognee bump**, since a new write path can break it silently:
+
+        * ``add_data_points`` — nodes and edges come from one model walk; an
+          edge with no chunk owner gets the v1 fold key its batch's nodes get.
+        * ``chunk_ownership.collect_chunk_ownership`` — a chunk's v2 key goes on
+          every non-document-scoped node of its walk and on the walk's edges;
+          an edge between two document-scoped nodes stays v1, which both carry.
+        * produced-but-existing relationship edges — both endpoints are the
+          chunk's own ``contains`` entities, so they carry its v2 key.
+        * global context index (``persist_context_index_edges``) — the parent
+          summary is written through ``add_data_points`` with the same key.
+        * ``consolidate_entities`` — re-pointed edges carry NO refs (our
+          ``get_graph_data`` strips them), so neither lookup sees them.
+        * ``namespace_entity_type_node_ids`` — refs are snapshotted and
+          restored onto both the new nodes and the new edges.
+        * ``create_chunk_associations`` — **the exception, and why the sweep
+          exists**: it resolves both chunk endpoints by a collection-wide vector
+          search, so a chunk->chunk edge can carry D's ref between two OTHER
+          documents' chunks.
+
+        ⚠ Known limitation: an edge that carries D's ref with neither endpoint
+        owning it and that is not chunk->chunk is NOT returned. No cognee 1.5.4
+        write path produces one. If one did, the miss leaves that edge with a
+        stale ref — a leak, never an over-delete — and ``delete_by_dataset``
+        still removes it. ``tests/test_source_refs_by_document.py`` pins this.
+        """
         if not data_id:
             return {}
-        rows = await self.query(
+        params = {"dataset_id": dataset_id, "data_id": data_id}
+        node_ids = list(await self.find_node_source_refs_by_document(dataset_id, data_id))
+        rows = []
+        if node_ids:
+            rows += await self.query(
+                f"""
+                MATCH (a:{_quote(BASE_LABEL)})-[r]-(:{_quote(BASE_LABEL)})
+                WHERE a.id IN $node_ids AND $dataset_id IN coalesce(r.source_dataset_ids, [])
+                WITH DISTINCT r
+                WITH r, [key IN coalesce(r.source_ref_keys, []) WHERE key CONTAINS $data_id] AS keys
+                WHERE size(keys) > 0
+                RETURN startNode(r).id AS s, endNode(r).id AS t, type(r) AS rel, keys
+                """,
+                {**params, "node_ids": node_ids},
+            )
+        rows += await self.query(
             f"""
-            MATCH (a:{_quote(BASE_LABEL)})-[r]->(b:{_quote(BASE_LABEL)})
+            MATCH (a:{_quote(CHUNK_LABEL)})-[r]->(b:{_quote(CHUNK_LABEL)})
             WHERE $dataset_id IN coalesce(r.source_dataset_ids, [])
             WITH a, r, b,
                  [key IN coalesce(r.source_ref_keys, []) WHERE key CONTAINS $data_id] AS keys
             WHERE size(keys) > 0
             RETURN a.id AS s, b.id AS t, type(r) AS rel, keys
             """,
-            {"dataset_id": dataset_id, "data_id": data_id},
+            params,
         )
         result: dict[EdgeIdentity, list[str]] = {}
         for row in rows:

@@ -144,8 +144,34 @@ a ~136k-node / ~700k-edge dataset one delete took >300 s and pinned FalkorDB
 (`hasattr`), so their result must **equal** by_dataset-then-filter —
 `tests/test_source_refs_by_document.py` asserts exactly that against the
 unpatched computation. The filter runs in Cypher (`key CONTAINS $data_id`, a
-superset) and is made exact in Python by parsing each key; it is still a label
-scan, but only one document's rows cross the wire.
+superset) and is made exact in Python by parsing each key.
+
+Measured live (homelab `cognee_graph`, ~136k nodes / ~700k edges, FalkorDB
+v4.20.6): the node label scan takes 66 ms; the same scan over every
+relationship **timed out at 30 s**. So edges are not scanned. They are the union
+of:
+
+1. **anchored** — edges incident to the document's own nodes, seeded by the
+   `__Node__.id` index (synthetic 136k/700k: 208 ms vs 7.4 s for the scan);
+2. **chunk sweep** — every `DocumentChunk -> DocumentChunk` edge (10.8 ms live).
+
+🚨 **That is complete only under an invariant of cognee's write path: an edge
+carrying document D's ref has an endpoint that also carries a D ref, or is
+chunk→chunk. Re-verify it on every cognee bump.** Checked against 1.5.4:
+`add_data_points` (nodes and edges from one model walk, same fold key),
+chunk-scoped ownership (a chunk's v2 key goes on its walk's nodes and edges;
+produced relationship edges join the chunk's own entities), the global context
+index (parent summaries share the edge's key), `consolidate_entities`
+(re-pointed edges carry no refs), and the node-id migration (restores refs on
+both). The one exception is `create_chunk_associations`: it resolves both chunk
+endpoints by collection-wide vector search, so the association edge can carry
+D's ref between two *other* documents' chunks — which is what the chunk sweep
+covers.
+
+⚠ **Known, tested limitation:** an edge carrying D's ref whose endpoints do not
+own D and that is not chunk→chunk is not returned. No 1.5.4 write path makes
+one; if a future one does, the edge keeps a stale ref (a leak, never an
+over-delete) and `delete_by_dataset` still removes it.
 
 ## Three things that will bite
 

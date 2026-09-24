@@ -39,6 +39,11 @@ NODE_TYPE_LABELS = (
     "NodeSet",
 )
 
+# The chunk type label. The per-document edge lookup sweeps edges between two
+# chunks explicitly: cognee's ``create_chunk_associations`` stamps them with a
+# document's ref while both endpoints may belong to other documents.
+CHUNK_LABEL = "DocumentChunk"
+
 # Connection defaults, used only when cognee's config leaves the corresponding
 # field empty. 📌 There is deliberately no default for a *wrong* value: cognee's
 # unset port sentinel (``GraphConfig.graph_database_port`` = 123) is passed

@@ -50,6 +50,13 @@ class _Ent(DataPoint):
     metadata: dict = {"index_fields": ["name"]}
 
 
+class DocumentChunk(DataPoint):
+    """Stands in for cognee's chunk: only the type label matters to the sweep."""
+
+    text: str
+    metadata: dict = {"index_fields": ["text"]}
+
+
 @pytest.fixture
 async def adapter():
     """A throwaway graph per test, with the id indexes the adapter expects."""
@@ -290,3 +297,80 @@ async def test_undecomposable_key_is_skipped_not_raised(adapter, world):
     )
 
     assert await adapter.find_node_source_refs_by_document(str(ds_1), str(doc_a)) == before
+
+
+# --- the edge lookup's invariant ------------------------------------------------
+#
+# Edges are found by anchoring on the document's own nodes, plus a sweep of
+# chunk->chunk edges (see ``find_edge_source_refs_by_document``). The three
+# cases below pin what that covers and what it does not.
+
+
+async def test_doc_specific_edge_between_nodes_of_different_documents(adapter, world):
+    """A shared entity + an edge only one document states, to another document's node.
+
+    ``rabbit`` is shared by doc_a and doc_b; ``hatter`` belongs to doc_c alone.
+    The edge carries doc_b's ref only: it is found through ``rabbit``, and not
+    returned for doc_c although one endpoint is doc_c's.
+    """
+    ds_1, ds_2 = world["datasets"]
+    doc_a, doc_b, doc_c = world["documents"]
+    rabbit, hatter = world["nodes"]["rabbit"], world["nodes"]["hatter"]
+
+    await adapter.attach_node_source_refs(
+        [str(rabbit.id)], [make_chunk_source_ref_key(ds_1, doc_b, uuid4())]
+    )
+    chases, chases_id = _edge(rabbit, hatter, "chases")
+    await adapter.add_edges([chases], source_ref_key=make_chunk_source_ref_key(ds_1, doc_b, uuid4()))
+
+    _nodes, edges = await _assert_matches_oracle(adapter, ds_1, doc_b)
+    assert chases_id in edges
+    for dataset_id in (ds_1, ds_2):
+        for data_id in (doc_a, doc_c):
+            _nodes, edges = await _assert_matches_oracle(adapter, dataset_id, data_id)
+            assert chases_id not in edges
+
+
+async def test_chunk_association_edge_between_other_documents_chunks_is_found(adapter, world):
+    """The ``create_chunk_associations`` case — the reason the chunk sweep exists.
+
+    Both chunks belong to doc_c; the association edge between them carries
+    doc_a's ref (its endpoints were resolved by a collection-wide vector search).
+    No node doc_a owns touches it, so only the sweep can find it.
+    """
+    ds_1, _ds_2 = world["datasets"]
+    doc_a, _doc_b, doc_c = world["documents"]
+    left, right = DocumentChunk(id=uuid4(), text="left"), DocumentChunk(id=uuid4(), text="right")
+    await adapter.add_nodes([left, right], source_ref_key=make_source_ref_key(ds_1, doc_c))
+    association, association_id = _edge(left, right, "is_similar_to")
+    await adapter.add_edges([association], source_ref_key=make_source_ref_key(ds_1, doc_a))
+
+    doc_a_nodes = await adapter.find_node_source_refs_by_document(str(ds_1), str(doc_a))
+    assert str(left.id) not in doc_a_nodes and str(right.id) not in doc_a_nodes
+
+    _nodes, edges = await _assert_matches_oracle(adapter, ds_1, doc_a)
+    assert edges[association_id] == [make_source_ref_key(ds_1, doc_a)]
+    _nodes, edges = await _assert_matches_oracle(adapter, ds_1, doc_c)
+    assert association_id not in edges
+
+
+async def test_known_limitation_unanchored_non_chunk_edge_is_missed(adapter, world):
+    """🚨 Pins the one shape the lookup does NOT cover — and that it is the only one.
+
+    An edge carrying doc_a's ref, whose endpoints do not own doc_a and are not
+    both chunks. No cognee 1.5.4 write path produces this (the invariant is
+    listed in ``find_edge_source_refs_by_document``). If a cognee bump adds one,
+    this is the shape that leaks: the edge keeps a stale ref, nothing is
+    over-deleted. When this test's premise changes, re-verify the invariant.
+    """
+    ds_1, _ds_2 = world["datasets"]
+    doc_a, _doc_b, doc_c = world["documents"]
+    left, right = _Ent(id=uuid4(), name="Dodo"), _Ent(id=uuid4(), name="Gryphon")
+    await adapter.add_nodes([left, right], source_ref_key=make_source_ref_key(ds_1, doc_c))
+    stray, stray_id = _edge(left, right, "argues_with")
+    await adapter.add_edges([stray], source_ref_key=make_source_ref_key(ds_1, doc_a))
+
+    edges = await adapter.find_edge_source_refs_by_document(str(ds_1), str(doc_a))
+    oracle = await _oracle_edges(adapter, str(ds_1), str(doc_a))
+    assert stray_id in oracle and stray_id not in edges
+    assert {k: v for k, v in oracle.items() if k != stray_id} == edges
