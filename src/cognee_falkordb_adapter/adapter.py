@@ -50,6 +50,7 @@ from cognee.infrastructure.databases.provenance import (
     get_dataset_id_from_source_ref_key,
     get_pipeline_run_id_from_source_run_ref,
     get_source_ref_key_from_source_run_ref,
+    parse_source_ref_key,
 )
 from cognee.infrastructure.databases.provenance.source_ref_state import (
     provenance_after_attach,
@@ -97,6 +98,28 @@ def _strip_provenance(properties: Optional[Dict[str, Any]]) -> Optional[Dict[str
 def _prov_list(value: Any) -> List[str]:
     """Normalize a native provenance list property (or a missing one) to ``list[str]``."""
     return list(value) if value else []
+
+
+def _document_refs(keys: Iterable[str], dataset_id: str, data_id: str) -> List[str]:
+    """The keys owned by one document of one dataset — v1 doc-scope and v2 chunk-scope.
+
+    The exact half of the per-document lookups: the Cypher pre-filter
+    (``CONTAINS $data_id``) is a superset, matching the id in ANY segment — a
+    dataset id or a chunk id equal to it — and matching keys of the same document
+    under another dataset on a node both datasets own. Both ids are compared per
+    key, as ``find_*_source_refs_by_dataset`` followed by cognee's
+    ``delete_by_document`` filter would. A key that does not decompose is skipped,
+    as that filter skips it.
+    """
+    owned = []
+    for key in keys:
+        try:
+            parsed = parse_source_ref_key(key)
+        except ValueError:
+            continue
+        if str(parsed.dataset_id) == dataset_id and str(parsed.data_id) == data_id:
+            owned.append(key)
+    return owned
 
 
 def _quote(identifier: str) -> str:
@@ -1235,6 +1258,78 @@ class FalkorDBAdapter(GraphDBInterface):
                 for key in _prov_list(row["keys"])
                 if str(get_dataset_id_from_source_ref_key(key)) == dataset_id
             ]
+            if owned:
+                result[
+                    EdgeIdentity(
+                        source_id=row["s"], target_id=row["t"], relationship_name=row["rel"]
+                    )
+                ] = owned
+        return result
+
+    # --- per-document lookups: NOT on GraphDBInterface -----------------------
+    #
+    # cognee 1.5.4's ``UnifiedStoreEngine.delete_by_document`` resolves one
+    # document's refs by calling ``find_*_source_refs_by_dataset`` — every node and
+    # edge of the dataset, with its whole key list — and filtering to the data id
+    # in Python. On a ~136k-node / ~700k-edge dataset one delete took >300 s with
+    # FalkorDB pinned at 100% CPU and PING dead (2026-09-24). The homelab cognee
+    # patch calls these instead when the adapter has them (``hasattr``), so their
+    # result must EQUAL that by_dataset-then-filter computation.
+    #
+    # The filter runs server-side, so only candidate rows and candidate keys are
+    # serialized. It is a superset by construction: both key versions carry the
+    # data id literally, ``source_ref:v1:{dataset_id}:{data_id}`` and
+    # ``source_ref:v2:{dataset_id}:{data_id}:{chunk_id}``, written from UUID
+    # objects and so canonical — the same form cognee passes as ``str(data_id)``.
+    # ``_document_refs`` then makes it exact. It is still a label scan, as the
+    # by_dataset reads are: FalkorDB cannot index list membership.
+    #
+    # No ``_source_ref_change_lock``: that serializes read-then-WRITE pairs, and
+    # these are single reads, like the by_dataset lookups they replace.
+
+    async def find_node_source_refs_by_document(
+        self, dataset_id: str, data_id: str
+    ) -> dict[str, list[str]]:
+        """``{node_id: keys}`` for the refs one document of one dataset owns."""
+        if not data_id:
+            return {}
+        rows = await self.query(
+            f"""
+            MATCH (n:{_quote(BASE_LABEL)})
+            WHERE $dataset_id IN coalesce(n.source_dataset_ids, [])
+            WITH n, [key IN coalesce(n.source_ref_keys, []) WHERE key CONTAINS $data_id] AS keys
+            WHERE size(keys) > 0
+            RETURN n.id AS id, keys
+            """,
+            {"dataset_id": dataset_id, "data_id": data_id},
+        )
+        result: dict[str, list[str]] = {}
+        for row in rows:
+            owned = _document_refs(_prov_list(row["keys"]), dataset_id, data_id)
+            if owned:
+                result[row["id"]] = owned
+        return result
+
+    async def find_edge_source_refs_by_document(
+        self, dataset_id: str, data_id: str
+    ) -> dict[EdgeIdentity, list[str]]:
+        """``{edge: keys}`` for the refs one document of one dataset owns."""
+        if not data_id:
+            return {}
+        rows = await self.query(
+            f"""
+            MATCH (a:{_quote(BASE_LABEL)})-[r]->(b:{_quote(BASE_LABEL)})
+            WHERE $dataset_id IN coalesce(r.source_dataset_ids, [])
+            WITH a, r, b,
+                 [key IN coalesce(r.source_ref_keys, []) WHERE key CONTAINS $data_id] AS keys
+            WHERE size(keys) > 0
+            RETURN a.id AS s, b.id AS t, type(r) AS rel, keys
+            """,
+            {"dataset_id": dataset_id, "data_id": data_id},
+        )
+        result: dict[EdgeIdentity, list[str]] = {}
+        for row in rows:
+            owned = _document_refs(_prov_list(row["keys"]), dataset_id, data_id)
             if owned:
                 result[
                     EdgeIdentity(

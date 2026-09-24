@@ -133,6 +133,20 @@ tags are actually removed, so a backend that inherits it fails
 `test_remove_belongs_to_set_tags_scoped_and_unscoped`. Both in-core adapters that
 pass the suite implement it, and so does this one — 41 methods, not 40.
 
+### Beyond the interface: per-document provenance lookups (0.4.0)
+
+`find_node_source_refs_by_document(dataset_id, data_id)` and
+`find_edge_source_refs_by_document(dataset_id, data_id)` are **not** on
+`GraphDBInterface`. cognee 1.5.4's `delete_by_document` fetches the whole dataset
+through `find_*_source_refs_by_dataset` and filters to one document in Python; on
+a ~136k-node / ~700k-edge dataset one delete took >300 s and pinned FalkorDB
+(2026-09-24). The homelab cognee patch calls these instead when present
+(`hasattr`), so their result must **equal** by_dataset-then-filter —
+`tests/test_source_refs_by_document.py` asserts exactly that against the
+unpatched computation. The filter runs in Cypher (`key CONTAINS $data_id`, a
+superset) and is made exact in Python by parsing each key; it is still a label
+scan, but only one document's rows cross the wire.
+
 ## Three things that will bite
 
 **Keep `falkordb >= 1.7.0`.** falkordb-py *below* that calls `Is_Cluster()` in its
