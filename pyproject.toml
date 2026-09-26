@@ -62,8 +62,18 @@ dependencies = [
 # installed, a live FalkorDB service, 20 passed with FALKORDB_REQUIRED=1 so skips
 # cannot read green. 1.5.3 is skipped deliberately: it still carries 19 cases, so
 # it would re-gate green without proving anything the 1.5.2 pin did not.
+#
+# 📌 1.5.4 -> 1.6.1 is interface-inert for this adapter. The suite still holds the
+# same 20 cases by name. GraphDBInterface gained three NON-abstract methods with
+# working defaults (get_top_degree_node_ids, iter_bounded_neighborhood,
+# get_entity_type_names - visualization only) and dropped the four
+# *_frequency_weights stubs; no core path calls a new provenance method on the
+# adapter. Every edge-ref writer (add_data_points, chunk_ownership,
+# create_chunk_associations, the node-id migrations) is semantically unchanged, so
+# the by_document invariant in the README still holds. 1.6.0 is skipped: same
+# suite, and production goes straight to 1.6.1.
 test = [
-  "cognee==1.5.4",
+  "cognee==1.6.1",
   "pytest>=8",
   "pytest-asyncio>=0.24",
 ]
