@@ -17,7 +17,8 @@ not a production adapter.
 ## Status
 
 **Production — deployed and serving.** The TrueNAS deployment pins this
-adapter at commit `f61fbff` under cognee `1.5.2`. All 41 methods are implemented
+adapter at commit `de6fecd` (0.4.1) under cognee `1.6.1`, deployed 2026-09-26 —
+the same cognee the contract gate runs. All 41 methods are implemented
 (the burn-down,
 `pytest -s`, reads `0/41`), ported from cognee's in-core Neo4j adapter with APOC
 replaced, the GDS block dropped, and the two `*_node_truth_state` methods taken
@@ -27,12 +28,6 @@ index-backed — see [Indexes](#indexes).
 
 cognee's own provenance contract suite passes **20/20** against a live FalkorDB —
 now as a CI gate rather than by hand. See [The contract gate](#the-contract-gate).
-
-⚠ **The deployed commit predates the provenance race fix.** `f61fbff` is behind
-`main`: it does not carry the fold-vs-attach fix, so the store it serves can still
-lose owner keys when two documents of one cognify run write a shared entity. The
-gate pin is also ahead of the deployment now — CI runs cognee `1.6.1`, production
-runs `1.5.4`. Both close on the next redeploy; neither is a defect in this repo.
 
 ## cognee constructs this, and it does not use your keyword names
 
