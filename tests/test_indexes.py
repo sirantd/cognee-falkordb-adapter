@@ -219,3 +219,22 @@ async def test_the_edge_write_path_the_adapter_emits_indexes_both_endpoints(adap
         _assert_index_backed(
             await _plan(adapter, query, params), expected_scans=2, context="add_edges"
         )
+
+
+async def test_the_id_filtered_read_the_adapter_emits_is_index_backed(adapter):
+    """``get_id_filtered_graph_data`` exists so that a search does not read the
+    whole graph. Its edge read and its node read must both start from the index;
+    a label scan here is the full read again, only slower to notice."""
+    source, target = uuid4(), uuid4()
+    await adapter.add_nodes([_Ent(id=source, name="A"), _Ent(id=target, name="B")])
+    await adapter.add_edge(str(source), str(target), "relates_to")
+
+    emitted = await _emitted(
+        adapter, lambda: adapter.get_id_filtered_graph_data([str(source)])
+    )
+
+    assert len(emitted) == 2, "expected one edge read and one node read"
+    for query, params in emitted:
+        _assert_index_backed(
+            await _plan(adapter, query, params), context="get_id_filtered_graph_data"
+        )

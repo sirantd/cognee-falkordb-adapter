@@ -12,18 +12,22 @@ rules and the tests asserting them stay in one place.
 
 from __future__ import annotations
 
+import sys
 from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 
 from cognee.infrastructure.engine import DataPoint
+from cognee.modules.graph.utils.prepare_edges_for_storage import get_edge_retrieval_text
 
 from cognee_falkordb_adapter import FalkorDBAdapter
 from cognee_falkordb_adapter.adapter import (
+    _PY_WHITESPACE,
     _connected_components,
     _dedupe,
     _quote,
+    _retrieval_text,
     _strip_provenance,
 )
 
@@ -163,3 +167,43 @@ def test_strip_provenance_returns_a_plain_dict():
     stripped = _strip_provenance(source)
     stripped["extra"] = 1
     assert "extra" not in source
+
+
+# ----------------------------------------------------------------------
+# Edge retrieval text — the Python half of get_existing_edge_retrieval_texts
+# ----------------------------------------------------------------------
+
+
+def test_whitespace_set_is_what_str_strip_removes():
+    """The server-side strip is exact only if this set is Python's whitespace.
+
+    A new Unicode version can add a whitespace character. If it does, this test
+    fails on that Python before the server-side strip starts to disagree.
+    """
+    python = {
+        chr(code_point) for code_point in range(sys.maxunicode + 1) if chr(code_point).isspace()
+    }
+    assert set(_PY_WHITESPACE) == python
+    assert len(_PY_WHITESPACE) == len(python), "a character is in the list two times"
+
+
+@pytest.mark.parametrize(
+    ("edge_text", "relationship_name"),
+    [
+        ("Alice knows Bob", "knows"),
+        ("  padded\n", "knows"),
+        ("", "likes"),
+        (" \t", " padded type "),
+        (None, "follows"),
+        (None, " "),
+        ("", ""),
+        (42, "counts"),
+        (True, "is"),
+        (1.5, "weighs"),
+        (["a"], "lists"),
+    ],
+)
+def test_retrieval_text_is_cognees(edge_text, relationship_name):
+    assert _retrieval_text(edge_text, relationship_name) == get_edge_retrieval_text(
+        edge_text, relationship_name
+    )
