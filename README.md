@@ -169,6 +169,49 @@ own D and that is not chunk→chunk is not returned. No 1.5.4 or 1.6.1 write pat
 makes one; if a future one does, the edge keeps a stale ref (a leak, never an
 over-delete) and `delete_by_dataset` still removes it.
 
+### Beyond the interface: bounded reads (0.5.0)
+
+Two more methods are not on `GraphDBInterface`. Each one replaces a cognee call
+to `get_graph_data()`, which reads every node and edge with all properties. On
+the live graph (~160k nodes / ~704k edges), these two calls caused 79 gunicorn
+OOM kills (8 GiB limit) and 3 FalkorDB OOM kills (4 GiB limit).
+
+**`get_existing_edge_retrieval_texts(texts)`** returns the subset of `texts` that
+is the retrieval text of at least one edge. cognee 1.6.1's
+`_cleanup_orphaned_edge_types` reads the full graph only to find this, on each
+rollback and delete that removes edges. The homelab cognee patch calls this
+method when the adapter has it (`hasattr`). Thus the result must equal cognee's
+computation: the edge scope of `get_graph_data`, and
+`get_edge_retrieval_text(edge_text, type(r))`. `tests/test_edge_retrieval_texts.py`
+compares the result with that computation.
+
+- The server scans all edges, but it sends back only the matched texts: at most
+  one row for each requested text. Its `DISTINCT` holds only matched texts.
+- 🚨 **FalkorDB's `trim()` removes only U+0020.** Python's `str.strip()` removes
+  29 code points, and cognee does not strip a non-blank `edge_text` before it
+  writes it. Thus the query does not use `trim()`. A row with whitespace at a
+  boundary gets a regex strip with Python's whitespace set. The other rows need
+  no strip.
+- An `edge_text` that is not a string or an integer (a float, a boolean, a list)
+  comes back raw, and Python converts it with `str()`. FalkorDB's `toString`
+  gives `1.500000` and `true`, and a list makes it fail. cognee writes
+  `edge_text` as a string, so a cognee graph has no such rows.
+- Measured on FalkorDB v4.20.7, on a synthetic graph of 704k edges: one query
+  takes approximately 2.5 s, and one query handles up to 5000 texts.
+
+**`get_id_filtered_graph_data(target_ids)`** returns the edges that touch
+`target_ids` and the endpoints of those edges. The shape is that of
+`get_graph_data`, without provenance. `CogneeGraph._get_full_or_id_filtered_graph`
+calls it when the adapter class has it; without it, each GRAPH_COMPLETION search
+reads the full graph. The semantics are those of cognee 1.6.1's neo4j and ladybug
+adapters, and `tests/test_id_filtered_graph_data.py` compares the result with
+them. The edge read and the node read both start from the `__Node__.id` index
+(`test_indexes.py`).
+
+⚠ The read is edge-driven, as upstream: a target with no edges is not returned.
+If no target has an edge, the result is empty, and cognee then falls back to
+`get_graph_data()` — the full read. This adapter keeps that upstream behaviour.
+
 ## Three things that will bite
 
 **Keep `falkordb >= 1.7.0`.** falkordb-py *below* that calls `Is_Cluster()` in its
