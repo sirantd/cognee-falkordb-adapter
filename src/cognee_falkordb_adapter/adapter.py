@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Collection
 from contextlib import nullcontext
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Type, Union
 from uuid import UUID
@@ -83,6 +84,100 @@ EdgeData = Tuple[str, str, str, Dict[str, Any]]
 
 _PROVENANCE_KEY_SET = frozenset(PROVENANCE_COLUMNS)
 
+# --- edge retrieval text ------------------------------------------------------
+#
+# The 29 code points that Python's ``str.strip()`` removes (``str.isspace()``).
+# 🚨 FalkorDB's ``trim()`` removes only U+0020 (measured on v4.20.7), so an edge
+# text such as "knows\n" keeps its newline there. cognee does not strip a
+# non-blank edge_text before it writes it, so this is not only a theoretical case.
+# ``test_port_helpers.py`` makes sure that this set agrees with the running Python.
+_PY_WHITESPACE = "".join(
+    chr(code_point)
+    for code_point in (
+        *range(0x09, 0x0E),  # TAB, LF, VT, FF, CR
+        *range(0x1C, 0x21),  # FS, GS, RS, US, SPACE
+        0x85,
+        0xA0,
+        0x1680,
+        *range(0x2000, 0x200B),
+        0x2028,
+        0x2029,
+        0x202F,
+        0x205F,
+        0x3000,
+    )
+)
+_PY_WHITESPACE_CLASS = f"[{_PY_WHITESPACE}]"
+# A server-side ``str.strip()``. ``string.replaceRegEx`` is correct for multibyte
+# code points (measured: U+2018 x U+2019 stays unchanged), but it costs
+# approximately 25 times a plain edge scan. Thus only rare rows use it.
+_PY_STRIP_PATTERN = f"^{_PY_WHITESPACE_CLASS}+|{_PY_WHITESPACE_CLASS}+$"
+
+# Requested texts per query. Each batch costs two edge scans (measured: 0.75 s
+# for 200k edges), so a large batch is better. 5000 keeps the reply at half the
+# RESULTSET_SIZE cap of the stock image (10000), which truncates without error.
+_EDGE_TEXT_BATCH = 5000
+# ``x IN $list`` is a linear search in FalkorDB (measured: 1000 texts cost 7 times
+# one text on 200k edges). The texts go into buckets by length, so each edge
+# compares only with the requested texts of its own length.
+_EDGE_TEXT_BUCKETS = 256
+
+# The first and the last character of the edge text and of the relationship type.
+# A character from '!' to '~' is not whitespace, and that test is cheap. Only a
+# row with another boundary character gets the 29-item ``IN $ws`` test: a WHERE
+# clause stops at the first true OR term and at the first false AND term
+# (measured). Strings compare by code point (measured).
+_BOUNDARIES = ("e_start", "e_end", "rel_start", "rel_end")
+_BOUNDARIES_PRINTABLE = " AND ".join(f"{c} >= '!' AND {c} < $del" for c in _BOUNDARIES)
+_BOUNDARIES_NOT_PRINTABLE = " OR ".join(f"{c} < '!' OR {c} >= $del" for c in _BOUNDARIES)
+_BOUNDARIES_WHITESPACE = " OR ".join(f"{c} IN $ws" for c in _BOUNDARIES)
+# A missing edge_text is tested as 'x', so it is a common row. An empty one is
+# not printable and has no whitespace, so it is a common row too.
+_EDGE_TEXT_BOUNDARIES = """
+WITH raw, rel, plain, edge_text,
+     left(coalesce(edge_text, 'x'), 1) AS e_start, right(coalesce(edge_text, 'x'), 1) AS e_end,
+     left(rel, 1) AS rel_start, right(rel, 1) AS rel_end
+"""
+
+# Two branches, joined by UNION. FalkorDB evaluates every branch of a CASE and
+# every term of a projection, so a CASE cannot keep the regex off the common
+# rows. A WHERE clause can: it removes rows before the next projection.
+#
+# 1. Common rows: a string or integer edge_text (or none), and no whitespace at
+#    the boundaries of the edge text or of the relationship type. The stored
+#    values are then the retrieval texts, so no strip is necessary.
+# 2. Rare rows: whitespace at a boundary, or an edge_text of another type. The
+#    regex strips both values. For another type (float, boolean, list, ...),
+#    ``toString`` does not agree with Python's ``str()`` (``1.500000``, ``true``),
+#    and a list makes it fail. So these rows return the raw value as ``exotic``
+#    and Python completes them. cognee writes edge_text as a string, so a cognee
+#    graph has no such rows.
+_EXISTING_EDGE_TEXTS_QUERY = f"""
+MATCH (:`{BASE_LABEL}`)-[r]->(:`{BASE_LABEL}`)
+WITH r.edge_text AS raw, type(r) AS rel
+WITH raw, rel, typeOf(raw) IN ['String', 'Integer', 'Null'] AS plain
+WHERE plain
+WITH raw, rel, plain, toString(raw) AS edge_text
+{_EDGE_TEXT_BOUNDARIES}
+WHERE ({_BOUNDARIES_PRINTABLE}) OR NOT ({_BOUNDARIES_WHITESPACE})
+WITH CASE WHEN edge_text <> '' THEN edge_text ELSE rel END AS text
+WHERE text IN $buckets[size(text) % size($buckets)]
+RETURN DISTINCT text, null AS exotic
+UNION
+MATCH (:`{BASE_LABEL}`)-[r]->(:`{BASE_LABEL}`)
+WITH r.edge_text AS raw, type(r) AS rel
+WITH raw, rel, typeOf(raw) IN ['String', 'Integer', 'Null'] AS plain
+WITH raw, rel, plain, toString(CASE WHEN plain THEN raw END) AS edge_text
+{_EDGE_TEXT_BOUNDARIES}
+WHERE NOT plain OR (({_BOUNDARIES_NOT_PRINTABLE}) AND ({_BOUNDARIES_WHITESPACE}))
+WITH CASE WHEN plain THEN null ELSE raw END AS exotic,
+     string.replaceRegEx(edge_text, $strip_pattern, '') AS edge_text,
+     string.replaceRegEx(rel, $strip_pattern, '') AS rel
+WITH exotic, CASE WHEN edge_text <> '' THEN edge_text ELSE rel END AS text
+WHERE exotic IS NOT NULL OR text IN $buckets[size(text) % size($buckets)]
+RETURN DISTINCT text, exotic
+"""
+
 
 def _strip_provenance(properties: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """Return ``properties`` without the four provenance list properties.
@@ -121,6 +216,14 @@ def _document_refs(keys: Iterable[str], dataset_id: str, data_id: str) -> List[s
         if str(parsed.dataset_id) == dataset_id and str(parsed.data_id) == data_id:
             owned.append(key)
     return owned
+
+
+def _retrieval_text(edge_text: Any, relationship_name: Any) -> str:
+    """cognee's ``get_edge_retrieval_text``: the first non-blank value, stripped, else ``""``."""
+    for value in (edge_text, relationship_name):
+        if value is not None and (text := str(value).strip()):
+            return text
+    return ""
 
 
 def _quote(identifier: str) -> str:
@@ -1641,6 +1744,125 @@ class FalkorDBAdapter(GraphDBInterface):
 
         logger.info("Retrieved %d nodes and %d edges", len(nodes), len(edges))
         return (nodes, edges)
+
+    async def get_id_filtered_graph_data(
+        self, target_ids: list[str]
+    ) -> tuple[list[Node], list[EdgeData]]:
+        """The edges that touch ``target_ids``, and the endpoints of those edges.
+
+        Not on ``GraphDBInterface``. ``CogneeGraph._get_full_or_id_filtered_graph``
+        calls it when the adapter class has it; without it, GRAPH_COMPLETION search
+        reads the full graph through ``get_graph_data``.
+
+        The semantics are those of cognee 1.6.1's neo4j and ladybug adapters. The
+        read is edge-driven: an edge is returned when one endpoint id is in
+        ``target_ids``, and a node is returned only as an endpoint of such an edge.
+        A target with no edges is not returned. If no target has an edge, the
+        result is empty and cognee falls back to ``get_graph_data``. The scope and
+        the shape are those of ``get_graph_data``: both endpoints carry the shared
+        label, and the provenance properties are removed.
+
+        The edge read starts from the ``__Node__.id`` index. ``DISTINCT r`` removes
+        the second match of an edge whose two endpoints are both targets. The node
+        read is a second index lookup, so each node is sent one time and not one
+        time for each of its edges.
+        """
+        if not target_ids:
+            logger.warning("No target IDs provided for ID-filtered graph retrieval.")
+            return [], []
+
+        edge_rows = await self.query(
+            f"""
+            MATCH (a:{_quote(BASE_LABEL)})-[r]-(:{_quote(BASE_LABEL)})
+            WHERE a.id IN $target_ids
+            WITH DISTINCT r
+            RETURN startNode(r).id AS source, endNode(r).id AS target,
+                   type(r) AS type, properties(r) AS properties
+            """,
+            {"target_ids": [str(target_id) for target_id in target_ids]},
+        )
+        if not edge_rows:
+            return [], []
+
+        endpoint_ids = _dedupe(
+            endpoint for row in edge_rows for endpoint in (row["source"], row["target"])
+        )
+        node_rows = await self.query(
+            f"""
+            MATCH (n:{_quote(BASE_LABEL)}) WHERE n.id IN $ids
+            RETURN properties(n) AS properties
+            """,
+            {"ids": endpoint_ids},
+        )
+        nodes = [
+            (properties["id"], properties)
+            for properties in (_strip_provenance(row["properties"]) for row in node_rows)
+        ]
+
+        edges = []
+        for row in edge_rows:
+            properties = _strip_provenance(row["properties"]) or {}
+            edges.append(
+                (
+                    properties.get("source_node_id", row["source"]),
+                    properties.get("target_node_id", row["target"]),
+                    row["type"],
+                    properties,
+                )
+            )
+
+        logger.info("ID-filtered retrieval: %d nodes and %d edges", len(nodes), len(edges))
+        return (nodes, edges)
+
+    async def get_existing_edge_retrieval_texts(self, texts: Collection[str]) -> set[str]:
+        """The subset of ``texts`` that is the retrieval text of at least one edge.
+
+        Not on ``GraphDBInterface``. cognee's
+        ``provenance_delete_planner._cleanup_orphaned_edge_types`` reads the full
+        graph through ``get_graph_data`` only to find which deleted edge texts
+        are still in use. The homelab cognee patch calls this method instead when
+        the adapter has it, so the result must equal that computation: the edge
+        scope of ``get_graph_data``, and cognee's ``get_edge_retrieval_text``
+        applied to ``edge_text`` and ``type(r)``.
+
+        For each batch of ``_EDGE_TEXT_BATCH`` texts, the server scans all edges
+        two times, but it sends back only the matched texts. Its ``DISTINCT``
+        holds only matched texts. Thus the reply has at most one row for each
+        requested text. The exception is an edge_text that is not a string or an
+        integer: such rows come back raw (see ``_EXISTING_EDGE_TEXTS_QUERY``), and
+        cognee never writes one.
+
+        A requested text that has whitespace at its start or end cannot be a
+        retrieval text, so it is not sent.
+        """
+        wanted = {text for text in texts if isinstance(text, str) and text == text.strip()}
+        if not wanted:
+            return set()
+
+        candidates = sorted(wanted)
+        found: set[str] = set()
+        for start in range(0, len(candidates), _EDGE_TEXT_BATCH):
+            buckets: list[list[str]] = [[] for _ in range(_EDGE_TEXT_BUCKETS)]
+            for text in candidates[start : start + _EDGE_TEXT_BATCH]:
+                buckets[len(text) % _EDGE_TEXT_BUCKETS].append(text)
+            rows = await self.query(
+                _EXISTING_EDGE_TEXTS_QUERY,
+                {
+                    "buckets": buckets,
+                    "ws": list(_PY_WHITESPACE),
+                    "del": "\x7f",
+                    "strip_pattern": _PY_STRIP_PATTERN,
+                },
+            )
+            for row in rows:
+                text = (
+                    row["text"]
+                    if row["exotic"] is None
+                    else _retrieval_text(row["exotic"], row["text"])
+                )
+                if text in wanted:
+                    found.add(text)
+        return found
 
     async def get_neighborhood(
         self,
