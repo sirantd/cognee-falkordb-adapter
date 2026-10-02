@@ -29,6 +29,7 @@ import pytest
 
 from cognee.infrastructure.engine import DataPoint
 
+import cognee_falkordb_adapter.adapter as adapter_module
 from cognee_falkordb_adapter import FalkorDBAdapter
 from cognee_falkordb_adapter.constants import BASE_LABEL, NODE_TYPE_LABELS
 
@@ -233,8 +234,35 @@ async def test_the_id_filtered_read_the_adapter_emits_is_index_backed(adapter):
         adapter, lambda: adapter.get_id_filtered_graph_data([str(source)])
     )
 
-    assert len(emitted) == 2, "expected one edge read and one node read"
+    assert len(emitted) == 3, "expected a pair count, one edge read and one node read"
     for query, params in emitted:
         _assert_index_backed(
             await _plan(adapter, query, params), context="get_id_filtered_graph_data"
+        )
+
+
+async def test_the_typed_id_filtered_read_the_adapter_emits_is_index_backed(
+    adapter, monkeypatch
+):
+    """The typed read (for a node with many edges) sends one read for each type
+    group. Each read must start from the index too. ``db.meta.stats()`` has no scan."""
+    monkeypatch.setattr(adapter_module, "_typed_read_is_faster", lambda *_: True)
+    monkeypatch.setattr(adapter_module, "_TYPE_GROUP_SIZE", 2)
+    source = uuid4()
+    others = [uuid4() for _ in range(5)]
+    await adapter.add_nodes([_Ent(id=node_id, name="n") for node_id in (source, *others)])
+    for index, other in enumerate(others):
+        await adapter.add_edge(str(source), str(other), f"type_{index}")
+
+    emitted = await _emitted(
+        adapter, lambda: adapter.get_id_filtered_graph_data([str(source)])
+    )
+
+    reads = [(query, params) for query, params in emitted if "db.meta.stats" not in query]
+    assert len(emitted) - len(reads) == 1, "expected one db.meta.stats() call"
+    # A pair count, three type groups (2 + 2 + 1 types) and one node read.
+    assert len(reads) == 5
+    for query, params in reads:
+        _assert_index_backed(
+            await _plan(adapter, query, params), context="typed get_id_filtered_graph_data"
         )

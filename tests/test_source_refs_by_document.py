@@ -36,9 +36,20 @@ from cognee.infrastructure.databases.provenance import (
 )
 from cognee.infrastructure.engine import DataPoint
 
+import cognee_falkordb_adapter.adapter as adapter_module
 from cognee_falkordb_adapter import BASE_LABEL, FalkorDBAdapter
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
+
+
+@pytest.fixture(autouse=True, params=["selected", "typed"])
+def read_path(request, monkeypatch):
+    """Each case runs on the anchored edge read as selected, and on the typed read
+    forced (two relationship types for each pattern, so there are several groups)."""
+    if request.param == "typed":
+        monkeypatch.setattr(adapter_module, "_typed_read_is_faster", lambda *_: True)
+        monkeypatch.setattr(adapter_module, "_TYPE_GROUP_SIZE", 2)
+    return request.param
 
 HOST = os.getenv("FALKORDB_HOST", "127.0.0.1")
 PORT = int(os.getenv("FALKORDB_PORT", "6379"))

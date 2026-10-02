@@ -10,6 +10,10 @@ m.id IN $ids`` — a full scan, on our shared label) and then the row handling o
 neo4j and ladybug verbatim. The adapter seeds from the id index instead; the
 plan test for that is in ``test_indexes.py``.
 
+The edge read is untyped for targets of normal degree and typed (one pattern
+for each group of relationship types) for targets with many edges. The
+``read_path`` fixture runs each case on the selected read and on each read forced.
+
 Needs a live FalkorDB (``FALKORDB_HOST`` / ``FALKORDB_PORT``).
 """
 
@@ -24,10 +28,29 @@ import pytest
 from cognee.infrastructure.databases.provenance import EdgeIdentity, make_source_ref_key
 from cognee.infrastructure.engine import DataPoint
 
+import cognee_falkordb_adapter.adapter as adapter_module
 from cognee_falkordb_adapter import BASE_LABEL, PROVENANCE_COLUMNS, FalkorDBAdapter
 from cognee_falkordb_adapter.adapter import _strip_provenance
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
+
+
+@pytest.fixture(params=["selected", "untyped", "typed_groups", "typed_singles"])
+def read_path(request, monkeypatch):
+    """The edge read of ``_anchored_edge_rows``: as selected, or forced.
+
+    ``typed_groups`` puts two types in each pattern, so one call has several
+    groups. ``typed_singles`` gives each type a pattern of its own.
+    """
+    if request.param == "untyped":
+        monkeypatch.setattr(adapter_module, "_typed_read_is_faster", lambda *_: False)
+    elif request.param == "typed_groups":
+        monkeypatch.setattr(adapter_module, "_typed_read_is_faster", lambda *_: True)
+        monkeypatch.setattr(adapter_module, "_TYPE_GROUP_SIZE", 2)
+    elif request.param == "typed_singles":
+        monkeypatch.setattr(adapter_module, "_typed_read_is_faster", lambda *_: True)
+        monkeypatch.setattr(adapter_module, "_TYPE_GROUP_SINGLE_EDGES", 0)
+    return request.param
 
 HOST = os.getenv("FALKORDB_HOST", "127.0.0.1")
 PORT = int(os.getenv("FALKORDB_PORT", "6379"))
@@ -149,7 +172,9 @@ async def world(adapter):
         list("abcdefg"),
     ],
 )
-async def test_result_equals_the_neo4j_and_ladybug_semantics(adapter, world, targets):
+async def test_result_equals_the_neo4j_and_ladybug_semantics(
+    adapter, world, read_path, targets
+):
     target_ids = [world[name] for name in targets]
 
     result = await adapter.get_id_filtered_graph_data(target_ids)
@@ -157,7 +182,7 @@ async def test_result_equals_the_neo4j_and_ladybug_semantics(adapter, world, tar
     assert _canonical(result) == _canonical(await _oracle(adapter, target_ids))
 
 
-async def test_edges_touch_a_target_and_nodes_are_their_endpoints(adapter, world):
+async def test_edges_touch_a_target_and_nodes_are_their_endpoints(adapter, world, read_path):
     """The shapes the oracle comparison depends on, stated directly for target a."""
     a, b, c, d, e = (world[name] for name in "abcde")
 
@@ -198,7 +223,7 @@ async def test_provenance_is_stripped_from_nodes_and_edges(adapter, world):
         assert not set(PROVENANCE_COLUMNS) & set(properties)
 
 
-async def test_no_edge_means_an_empty_result(adapter, world):
+async def test_no_edge_means_an_empty_result(adapter, world, read_path):
     """An isolated target, an unknown id, and no ids all give ``([], [])``.
 
     📌 cognee then falls back to ``get_graph_data``: an empty result here is the
@@ -220,3 +245,68 @@ async def test_edge_identities_match_the_edge_identity_of_get_graph_data(adapter
     by_identity = {identity(edge): edge for edge in all_edges}
     for edge in edges:
         assert by_identity[identity(edge)] == edge
+
+
+# --- many relationship types --------------------------------------------------
+#
+# cognee writes each relationship name from the LLM as an edge type, so the live
+# graph has approximately 20k types. A typed pattern takes 255 types or fewer:
+# FalkorDB keeps the count in a uint8_t, and a pattern with more types matches
+# the wrong edges without an error (see ``_TYPE_GROUP_SIZE``).
+
+MANY_TYPES = 600
+
+
+@pytest.fixture
+async def hub(adapter):
+    """A hub with ``MANY_TYPES`` edges to three spokes, one type each, and one edge
+    text on all of them. Parallel edges of different types share each pair."""
+    hub_node = _Ent(id=uuid4(), name="hub")
+    spokes = [_Ent(id=uuid4(), name=f"spoke {index}") for index in range(3)]
+    await adapter.add_nodes([hub_node, *spokes])
+    await adapter.add_edges(
+        [
+            (str(hub_node.id), str(spokes[index % 3].id), f"rel_{index}", {"edge_text": "same"})
+            for index in range(MANY_TYPES)
+        ]
+    )
+    return str(hub_node.id), [str(spoke.id) for spoke in spokes]
+
+
+@pytest.mark.parametrize("anchor", ["hub", "spoke", "both"])
+async def test_more_types_than_one_pattern_takes(adapter, hub, monkeypatch, anchor):
+    """The typed read with the default group size: three groups of 255 types or
+    fewer. A group of 256 would match every edge of the hub (duplicates); a group
+    of 300 would match the edges of 44 types only (missing edges)."""
+    monkeypatch.setattr(adapter_module, "_typed_read_is_faster", lambda *_: True)
+    hub_id, spoke_ids = hub
+    target_ids = {"hub": [hub_id], "spoke": spoke_ids[:1], "both": [hub_id, *spoke_ids]}[anchor]
+
+    result = await adapter.get_id_filtered_graph_data(target_ids)
+
+    assert _canonical(result) == _canonical(await _oracle(adapter, target_ids))
+    expected = MANY_TYPES if anchor != "spoke" else MANY_TYPES // 3
+    assert len(result[1]) == expected
+
+
+async def test_type_groups(adapter, monkeypatch):
+    """Types with no edge are not in a group, a large type has a group of its own,
+    and no group has more than ``_TYPE_GROUP_SIZE`` types."""
+    monkeypatch.setattr(adapter_module, "_TYPE_GROUP_SINGLE_EDGES", 2)
+    nodes = [_Ent(id=uuid4(), name=f"n{index}") for index in range(4)]
+    await adapter.add_nodes(nodes)
+    ids = [str(node.id) for node in nodes]
+    await adapter.add_edges(
+        [(ids[0], ids[index], "large", {}) for index in (1, 2, 3)]
+        + [(ids[0], ids[1], f"small_{index}", {}) for index in range(300)]
+        + [(ids[0], ids[1], "removed", {})]
+    )
+    await adapter.query("MATCH ()-[r:removed]->() DELETE r")
+
+    groups = await adapter._relationship_type_groups()
+
+    assert ["large"] in groups
+    assert all(len(group) <= adapter_module._TYPE_GROUP_SIZE for group in groups)
+    assert sorted(name for group in groups for name in group) == sorted(
+        ["large", *(f"small_{index}" for index in range(300))]
+    )
