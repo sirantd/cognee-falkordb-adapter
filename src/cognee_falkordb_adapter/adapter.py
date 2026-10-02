@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Collection
+from collections.abc import Callable
 from contextlib import nullcontext
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Type, Union
 from uuid import UUID
@@ -84,99 +84,49 @@ EdgeData = Tuple[str, str, str, Dict[str, Any]]
 
 _PROVENANCE_KEY_SET = frozenset(PROVENANCE_COLUMNS)
 
-# --- edge retrieval text ------------------------------------------------------
+# --- edge reads that start from node ids -----------------------------------------
 #
-# The 29 code points that Python's ``str.strip()`` removes (``str.isspace()``).
-# 🚨 FalkorDB's ``trim()`` removes only U+0020 (measured on v4.20.7), so an edge
-# text such as "knows\n" keeps its newline there. cognee does not strip a
-# non-blank edge_text before it writes it, so this is not only a theoretical case.
-# ``test_port_helpers.py`` makes sure that this set agrees with the running Python.
-_PY_WHITESPACE = "".join(
-    chr(code_point)
-    for code_point in (
-        *range(0x09, 0x0E),  # TAB, LF, VT, FF, CR
-        *range(0x1C, 0x21),  # FS, GS, RS, US, SPACE
-        0x85,
-        0xA0,
-        0x1680,
-        *range(0x2000, 0x200B),
-        0x2028,
-        0x2029,
-        0x202F,
-        0x205F,
-        0x3000,
-    )
-)
-_PY_WHITESPACE_CLASS = f"[{_PY_WHITESPACE}]"
-# A server-side ``str.strip()``. ``string.replaceRegEx`` is correct for multibyte
-# code points (measured: U+2018 x U+2019 stays unchanged), but it costs
-# approximately 25 times a plain edge scan. Thus only rare rows use it.
-_PY_STRIP_PATTERN = f"^{_PY_WHITESPACE_CLASS}+|{_PY_WHITESPACE_CLASS}+$"
-
-# Requested texts per query. Each batch costs two edge scans (measured: 0.75 s
-# for 200k edges), so a large batch is better. 5000 keeps the reply at half the
-# RESULTSET_SIZE cap of the stock image (10000), which truncates without error.
-_EDGE_TEXT_BATCH = 5000
-# ``x IN $list`` is a linear search in FalkorDB (measured: 1000 texts cost 7 times
-# one text on 200k edges). The texts go into buckets by length, so each edge
-# compares only with the requested texts of its own length.
-_EDGE_TEXT_BUCKETS = 256
-
-# The first and the last character of the edge text and of the relationship type.
-# A character from '!' to '~' is not whitespace, and that test is cheap. Only a
-# row with another boundary character gets the 29-item ``IN $ws`` test: a WHERE
-# clause stops at the first true OR term and at the first false AND term
-# (measured). Strings compare by code point (measured).
-_BOUNDARIES = ("e_start", "e_end", "rel_start", "rel_end")
-_BOUNDARIES_PRINTABLE = " AND ".join(f"{c} >= '!' AND {c} < $del" for c in _BOUNDARIES)
-_BOUNDARIES_NOT_PRINTABLE = " OR ".join(f"{c} < '!' OR {c} >= $del" for c in _BOUNDARIES)
-_BOUNDARIES_WHITESPACE = " OR ".join(f"{c} IN $ws" for c in _BOUNDARIES)
-# A missing edge_text is tested as 'x', so it is a common row. An empty one is
-# not printable and has no whitespace, so it is a common row too.
-_EDGE_TEXT_BOUNDARIES = """
-WITH raw, rel, plain, edge_text,
-     left(coalesce(edge_text, 'x'), 1) AS e_start, right(coalesce(edge_text, 'x'), 1) AS e_end,
-     left(rel, 1) AS rel_start, right(rel, 1) AS rel_end
-"""
-
-# Two branches, joined by UNION. FalkorDB evaluates every branch of a CASE and
-# every term of a projection, so a CASE cannot keep the regex off the common
-# rows. A WHERE clause can: it removes rows before the next projection.
+# 🚨 cognee uses each relationship name from the LLM as the FalkorDB edge type.
+# Thus a cognee graph has many types: 19,944 on a copy of the live graph
+# (2026-10: 187k nodes, 756k edges). Costs measured on that copy, FalkorDB v4.20.7:
 #
-# 1. Common rows: a string or integer edge_text (or none), and no whitespace at
-#    the boundaries of the edge text or of the relationship type. The stored
-#    values are then the retrieval texts, so no strip is necessary.
-# 2. Rare rows: whitespace at a boundary, or an edge_text of another type. The
-#    regex strips both values. For another type (float, boolean, list, ...),
-#    ``toString`` does not agree with Python's ``str()`` (``1.500000``, ``true``),
-#    and a list makes it fail. So these rows return the raw value as ``exotic``
-#    and Python completes them. cognee writes edge_text as a string, so a cognee
-#    graph has no such rows.
-_EXISTING_EDGE_TEXTS_QUERY = f"""
-MATCH (:`{BASE_LABEL}`)-[r]->(:`{BASE_LABEL}`)
-WITH r.edge_text AS raw, type(r) AS rel
-WITH raw, rel, typeOf(raw) IN ['String', 'Integer', 'Null'] AS plain
-WHERE plain
-WITH raw, rel, plain, toString(raw) AS edge_text
-{_EDGE_TEXT_BOUNDARIES}
-WHERE ({_BOUNDARIES_PRINTABLE}) OR NOT ({_BOUNDARIES_WHITESPACE})
-WITH CASE WHEN edge_text <> '' THEN edge_text ELSE rel END AS text
-WHERE text IN $buckets[size(text) % size($buckets)]
-RETURN DISTINCT text, null AS exotic
-UNION
-MATCH (:`{BASE_LABEL}`)-[r]->(:`{BASE_LABEL}`)
-WITH r.edge_text AS raw, type(r) AS rel
-WITH raw, rel, typeOf(raw) IN ['String', 'Integer', 'Null'] AS plain
-WITH raw, rel, plain, toString(CASE WHEN plain THEN raw END) AS edge_text
-{_EDGE_TEXT_BOUNDARIES}
-WHERE NOT plain OR (({_BOUNDARIES_NOT_PRINTABLE}) AND ({_BOUNDARIES_WHITESPACE}))
-WITH CASE WHEN plain THEN null ELSE raw END AS exotic,
-     string.replaceRegEx(edge_text, $strip_pattern, '') AS edge_text,
-     string.replaceRegEx(rel, $strip_pattern, '') AS rel
-WITH exotic, CASE WHEN edge_text <> '' THEN edge_text ELSE rel END AS text
-WHERE exotic IS NOT NULL OR text IN $buckets[size(text) % size($buckets)]
-RETURN DISTINCT text, exotic
-"""
+# * An untyped pattern ``(a)-[r]-(b)`` finds the edges of each node pair with one
+#   lookup in the matrix of EACH type (``Graph_GetEdgesConnectingNodes`` with
+#   ``GRAPH_NO_RELATION``): approximately 6.4 ms for each pair, both directions.
+# * A typed pattern ``(a)-[r:A|B]-(b)`` does one matrix multiplication for each
+#   type and each batch of 16 start nodes (``BATCH_SIZE`` in
+#   ``op_conditional_traverse.c``). Then each matched pair gets one lookup for
+#   each type of the pattern.
+#
+# So the untyped read costs pairs x types, and the typed read costs batches x
+# types. A node with many edges is slow untyped (an EntityType with 44k edges:
+# 272 s), and a few nodes of normal degree are faster untyped.
+# ``_anchored_edge_rows`` counts the pairs first and selects the read. A pattern
+# without an edge variable reads only the adjacency matrix: 2 ms for 900 pairs.
+#
+# 🚨 A typed pattern must have 255 types or fewer. FalkorDB keeps the type count
+# of a pattern in a ``uint8_t`` (``EdgeTraverseCtx_New``). Measured: a pattern
+# with 256 types matched every edge of the graph, and a pattern with 300 types
+# matched only the edges of 44 of them. FalkorDB gives no error.
+_TRAVERSE_BATCH = 16
+# Measured end to end on the copy: the typed read costs approximately 2.5 s
+# (``db.meta.stats()`` and 96 queries) plus 0.45 s for each further batch of
+# start nodes. The untyped read costs 6.4 ms for each pair. The ratio does not
+# change with the type count, because both costs increase with it.
+_TYPED_READ_BASE_PAIRS = 400
+_TYPED_READ_PAIRS_PER_BATCH = 70
+_TYPE_GROUP_SIZE = 255
+# A typed pattern looks up each matched pair once for each of its types. A type
+# with more edges than this gets a pattern of its own, so its pairs are not
+# looked up 255 times. The live graph has 17 such types.
+_TYPE_GROUP_SINGLE_EDGES = 1000
+
+
+def _typed_read_is_faster(pairs: int, anchor_count: int) -> bool:
+    """True if the typed read of ``anchor_count`` start nodes is faster than the
+    untyped read of their ``pairs`` node pairs."""
+    batches = -(-anchor_count // _TRAVERSE_BATCH)
+    return pairs > _TYPED_READ_BASE_PAIRS + _TYPED_READ_PAIRS_PER_BATCH * batches
 
 
 def _strip_provenance(properties: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -216,14 +166,6 @@ def _document_refs(keys: Iterable[str], dataset_id: str, data_id: str) -> List[s
         if str(parsed.dataset_id) == dataset_id and str(parsed.data_id) == data_id:
             owned.append(key)
     return owned
-
-
-def _retrieval_text(edge_text: Any, relationship_name: Any) -> str:
-    """cognee's ``get_edge_retrieval_text``: the first non-blank value, stripped, else ``""``."""
-    for value in (edge_text, relationship_name):
-        if value is not None and (text := str(value).strip()):
-            return text
-    return ""
 
 
 def _quote(identifier: str) -> str:
@@ -1011,6 +953,76 @@ class FalkorDBAdapter(GraphDBInterface):
             for row in rows
         ]
 
+    async def _relationship_type_groups(self) -> Optional[List[List[str]]]:
+        """The relationship types that have edges, in groups for typed patterns.
+
+        ``db.meta.stats()`` gives each type and its edge count in one call
+        (approximately 0.5 s for 19,944 types). A type with more than
+        ``_TYPE_GROUP_SINGLE_EDGES`` edges gets a group of its own. The other
+        types go into groups of ``_TYPE_GROUP_SIZE``.
+
+        Returns None if a type name has a backtick or a NUL. ``_quote`` must
+        remove these characters, so a pattern cannot name that type. Then the
+        caller must use the untyped read, which is correct for all types.
+        """
+        rows = await self.query("CALL db.meta.stats()")
+        counts: Dict[str, int] = rows[0]["relTypes"] if rows else {}
+        if any("`" in name or "\x00" in name for name in counts):
+            return None
+        groups = [[name] for name, count in counts.items() if count > _TYPE_GROUP_SINGLE_EDGES]
+        small = [name for name, count in counts.items() if 0 < count <= _TYPE_GROUP_SINGLE_EDGES]
+        groups += [
+            small[start : start + _TYPE_GROUP_SIZE]
+            for start in range(0, len(small), _TYPE_GROUP_SIZE)
+        ]
+        return groups
+
+    async def _anchored_edge_rows(
+        self,
+        query_for: Callable[[str], str],
+        anchor_ids: List[str],
+        params: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Run an edge read that starts from the nodes with ``a.id IN $anchor_ids``.
+
+        ``query_for(pattern)`` must return the read, with ``pattern`` as the
+        relationship pattern of ``a``: ``[r]``, or ``[r:`A`|`B`]`` for one type
+        group. The read must keep ``DISTINCT r``. The type groups do not share a
+        type, so the rows of two groups do not have the same edge.
+
+        The cost model is above ``_TRAVERSE_BATCH``. This method counts the
+        node pairs of the anchors with an untyped pattern that has no edge
+        variable, and then selects the read with ``_typed_read_is_faster``:
+
+        * Few pairs: one untyped query, as before.
+        * Many pairs: one typed query for each group of
+          ``_relationship_type_groups``. Each query is short, so a write can
+          run between two of them. Thus the rows are not one snapshot of the
+          graph: an edge that a concurrent write adds or removes can be absent
+          or present.
+        """
+        all_params = {**(params or {}), "anchor_ids": anchor_ids}
+        counted = await self.query(
+            f"""
+            MATCH (a:{_quote(BASE_LABEL)})--(:{_quote(BASE_LABEL)})
+            WHERE a.id IN $anchor_ids
+            RETURN count(*) AS pairs
+            """,
+            {"anchor_ids": anchor_ids},
+        )
+        pairs = counted[0]["pairs"] if counted else 0
+        groups = None
+        if _typed_read_is_faster(pairs, len(anchor_ids)):
+            groups = await self._relationship_type_groups()
+        if groups is None:
+            return await self.query(query_for("[r]"), all_params)
+
+        rows: List[Dict[str, Any]] = []
+        for group in groups:
+            pattern = "[r:" + "|".join(_quote(name) for name in group) + "]"
+            rows += await self.query(query_for(pattern), all_params)
+        return rows
+
     # ------------------------------------------------------------------
     # Graph provenance
     #
@@ -1482,16 +1494,19 @@ class FalkorDBAdapter(GraphDBInterface):
         node_ids = list(await self.find_node_source_refs_by_document(dataset_id, data_id))
         rows = []
         if node_ids:
-            rows += await self.query(
-                f"""
-                MATCH (a:{_quote(BASE_LABEL)})-[r]-(:{_quote(BASE_LABEL)})
-                WHERE a.id IN $node_ids AND $dataset_id IN coalesce(r.source_dataset_ids, [])
+            # A document owns shared nodes too (an EntityType, a NodeSet) that can
+            # have 100k edges. ``_anchored_edge_rows`` then reads with typed patterns.
+            rows += await self._anchored_edge_rows(
+                lambda pattern: f"""
+                MATCH (a:{_quote(BASE_LABEL)})-{pattern}-(:{_quote(BASE_LABEL)})
+                WHERE a.id IN $anchor_ids AND $dataset_id IN coalesce(r.source_dataset_ids, [])
                 WITH DISTINCT r
                 WITH r, [key IN coalesce(r.source_ref_keys, []) WHERE key CONTAINS $data_id] AS keys
                 WHERE size(keys) > 0
                 RETURN startNode(r).id AS s, endNode(r).id AS t, type(r) AS rel, keys
                 """,
-                {**params, "node_ids": node_ids},
+                node_ids,
+                params,
             )
         rows += await self.query(
             f"""
@@ -1766,20 +1781,25 @@ class FalkorDBAdapter(GraphDBInterface):
         the second match of an edge whose two endpoints are both targets. The node
         read is a second index lookup, so each node is sent one time and not one
         time for each of its edges.
+
+        A search target can have many edges (an EntityType node can have 40k
+        ``is_a`` edges). ``_anchored_edge_rows`` then reads the edges with typed
+        patterns, because the untyped read costs one lookup for each type and
+        each pair.
         """
         if not target_ids:
             logger.warning("No target IDs provided for ID-filtered graph retrieval.")
             return [], []
 
-        edge_rows = await self.query(
-            f"""
-            MATCH (a:{_quote(BASE_LABEL)})-[r]-(:{_quote(BASE_LABEL)})
-            WHERE a.id IN $target_ids
+        edge_rows = await self._anchored_edge_rows(
+            lambda pattern: f"""
+            MATCH (a:{_quote(BASE_LABEL)})-{pattern}-(:{_quote(BASE_LABEL)})
+            WHERE a.id IN $anchor_ids
             WITH DISTINCT r
             RETURN startNode(r).id AS source, endNode(r).id AS target,
                    type(r) AS type, properties(r) AS properties
             """,
-            {"target_ids": [str(target_id) for target_id in target_ids]},
+            [str(target_id) for target_id in target_ids],
         )
         if not edge_rows:
             return [], []
@@ -1813,56 +1833,6 @@ class FalkorDBAdapter(GraphDBInterface):
 
         logger.info("ID-filtered retrieval: %d nodes and %d edges", len(nodes), len(edges))
         return (nodes, edges)
-
-    async def get_existing_edge_retrieval_texts(self, texts: Collection[str]) -> set[str]:
-        """The subset of ``texts`` that is the retrieval text of at least one edge.
-
-        Not on ``GraphDBInterface``. cognee's
-        ``provenance_delete_planner._cleanup_orphaned_edge_types`` reads the full
-        graph through ``get_graph_data`` only to find which deleted edge texts
-        are still in use. The homelab cognee patch calls this method instead when
-        the adapter has it, so the result must equal that computation: the edge
-        scope of ``get_graph_data``, and cognee's ``get_edge_retrieval_text``
-        applied to ``edge_text`` and ``type(r)``.
-
-        For each batch of ``_EDGE_TEXT_BATCH`` texts, the server scans all edges
-        two times, but it sends back only the matched texts. Its ``DISTINCT``
-        holds only matched texts. Thus the reply has at most one row for each
-        requested text. The exception is an edge_text that is not a string or an
-        integer: such rows come back raw (see ``_EXISTING_EDGE_TEXTS_QUERY``), and
-        cognee never writes one.
-
-        A requested text that has whitespace at its start or end cannot be a
-        retrieval text, so it is not sent.
-        """
-        wanted = {text for text in texts if isinstance(text, str) and text == text.strip()}
-        if not wanted:
-            return set()
-
-        candidates = sorted(wanted)
-        found: set[str] = set()
-        for start in range(0, len(candidates), _EDGE_TEXT_BATCH):
-            buckets: list[list[str]] = [[] for _ in range(_EDGE_TEXT_BUCKETS)]
-            for text in candidates[start : start + _EDGE_TEXT_BATCH]:
-                buckets[len(text) % _EDGE_TEXT_BUCKETS].append(text)
-            rows = await self.query(
-                _EXISTING_EDGE_TEXTS_QUERY,
-                {
-                    "buckets": buckets,
-                    "ws": list(_PY_WHITESPACE),
-                    "del": "\x7f",
-                    "strip_pattern": _PY_STRIP_PATTERN,
-                },
-            )
-            for row in rows:
-                text = (
-                    row["text"]
-                    if row["exotic"] is None
-                    else _retrieval_text(row["exotic"], row["text"])
-                )
-                if text in wanted:
-                    found.add(text)
-        return found
 
     async def get_neighborhood(
         self,
