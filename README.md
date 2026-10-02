@@ -17,8 +17,9 @@ not a production adapter.
 ## Status
 
 **Production — deployed and serving.** The TrueNAS deployment pins this
-adapter at commit `de6fecd` (0.4.1) under cognee `1.6.1`, deployed 2026-09-26 —
-the same cognee the contract gate runs. All 41 methods are implemented
+adapter at commit `9515499` (0.5.1) under cognee `1.6.1`, deployed 2026-10-02 —
+the same cognee the contract gate runs. `main` is 0.5.2, which adds the property
+indexes and is not deployed yet. All 41 methods are implemented
 (the burn-down,
 `pytest -s`, reads `0/41`), ported from cognee's in-core Neo4j adapter with APOC
 replaced, the GDS block dropped, and the two `*_node_truth_state` methods taken
@@ -350,7 +351,7 @@ readable, but there is no reason to lose the rest of the extraction text.
 ```bash
 pip install -e '.[test]'
 pytest -s -m "not integration"           # surface, signatures, port helpers, the pin — no server
-docker run -d --rm -p 6379:6379 falkordb/falkordb:v4.20.1
+docker run -d --rm -p 6379:6379 falkordb/falkordb:v4.20.7    # the version CI uses
 pytest -m integration                    # port delta, indexes and the contract suite
 FALKORDB_REQUIRED=1 pytest tests/test_contract.py -v   # the gate, as CI runs it
 ```
