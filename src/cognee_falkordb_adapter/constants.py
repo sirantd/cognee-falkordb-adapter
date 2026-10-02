@@ -44,6 +44,15 @@ NODE_TYPE_LABELS = (
 # document's ref while both endpoints may belong to other documents.
 CHUNK_LABEL = "DocumentChunk"
 
+# Range indexes on properties other than ``id``, as ``(label, property)``. A
+# document prune finds the chunks of a document by ``document_id`` and the summary
+# of each chunk by ``source_chunk_id``. Without these indexes each lookup is a
+# ``Node By Label Scan`` of every node of that label (#11).
+PROPERTY_INDEXES = (
+    (CHUNK_LABEL, "document_id"),
+    ("TextSummary", "source_chunk_id"),
+)
+
 # Connection defaults, used only when cognee's config leaves the corresponding
 # field empty. 📌 There is deliberately no default for a *wrong* value: cognee's
 # unset port sentinel (``GraphConfig.graph_database_port`` = 123) is passed

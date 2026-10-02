@@ -9,9 +9,14 @@ from types import SimpleNamespace
 import pytest
 
 from cognee_falkordb_adapter import FalkorDBAdapter
-from cognee_falkordb_adapter.constants import BASE_LABEL, NODE_TYPE_LABELS
+from cognee_falkordb_adapter.constants import BASE_LABEL, NODE_TYPE_LABELS, PROPERTY_INDEXES
 
 pytestmark = pytest.mark.asyncio
+
+EXPECTED_INDEXES = [
+    *((label, "id") for label in (BASE_LABEL, *NODE_TYPE_LABELS)),
+    *PROPERTY_INDEXES,
+]
 
 
 class _IndexRecordingGraph:
@@ -29,10 +34,10 @@ def _adapter(graph):
     return FalkorDBAdapter(driver=SimpleNamespace(select_graph=lambda name: graph))
 
 
-async def test_first_call_creates_every_id_index():
+async def test_first_call_creates_every_index():
     graph = _IndexRecordingGraph()
     await _adapter(graph).initialize()
-    assert graph.calls == [(label, "id") for label in (BASE_LABEL, *NODE_TYPE_LABELS)]
+    assert graph.calls == EXPECTED_INDEXES
 
 
 async def test_repeat_calls_do_not_reach_the_server():
@@ -40,7 +45,7 @@ async def test_repeat_calls_do_not_reach_the_server():
     adapter = _adapter(graph)
     for _ in range(3):
         await adapter.initialize()
-    assert len(graph.calls) == 1 + len(NODE_TYPE_LABELS)
+    assert len(graph.calls) == len(EXPECTED_INDEXES)
 
 
 async def test_already_indexed_counts_as_ready():
@@ -48,7 +53,7 @@ async def test_already_indexed_counts_as_ready():
     adapter = _adapter(graph)
     await adapter.initialize()
     await adapter.initialize()
-    assert len(graph.calls) == 1 + len(NODE_TYPE_LABELS)
+    assert len(graph.calls) == len(EXPECTED_INDEXES)
 
 
 async def test_a_real_failure_is_retried_on_the_next_call():
@@ -58,4 +63,4 @@ async def test_a_real_failure_is_retried_on_the_next_call():
         await adapter.initialize()
     graph.fail_with = None
     await adapter.initialize()
-    assert graph.calls[-1] == (NODE_TYPE_LABELS[-1], "id")
+    assert graph.calls[-1] == EXPECTED_INDEXES[-1]
