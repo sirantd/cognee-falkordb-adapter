@@ -31,7 +31,7 @@ from cognee.infrastructure.engine import DataPoint
 
 import cognee_falkordb_adapter.adapter as adapter_module
 from cognee_falkordb_adapter import FalkorDBAdapter
-from cognee_falkordb_adapter.constants import BASE_LABEL, NODE_TYPE_LABELS
+from cognee_falkordb_adapter.constants import BASE_LABEL, NODE_TYPE_LABELS, PROPERTY_INDEXES
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
@@ -121,10 +121,33 @@ async def test_initialize_creates_both_index_families(adapter):
         assert label in indexed, f"no index on {label}(id) — id lookups will All-Node-Scan"
 
 
+async def test_initialize_creates_the_property_indexes(adapter):
+    # `db.indexes()` returns one row for each label; `properties` lists every
+    # indexed property of that label, `id` included.
+    indexed = {
+        (row["label"], prop)
+        for row in await adapter.query("CALL db.indexes()")
+        for prop in row["properties"]
+    }
+    for label, prop in PROPERTY_INDEXES:
+        assert (label, prop) in indexed, f"no index on {label}({prop}) — the lookup will label-scan"
+
+
 async def test_initialize_is_idempotent(adapter):
     """Every converge after the first re-runs this; it must not raise."""
     await adapter.initialize()
     await adapter.initialize()
+
+
+async def test_a_second_adapter_on_the_same_graph_initializes(adapter):
+    """A repeat call on one instance returns before it reaches the server. A new
+    instance (a new process) sends every CREATE INDEX again, and the server raises
+    "already indexed" for each one. initialize() must accept that for every index."""
+    second = FalkorDBAdapter(host=HOST, port=PORT, graph_database_name=adapter._graph_name)
+    try:
+        await second.initialize()
+    finally:
+        await second.close()
 
 
 # ----------------------------------------------------------------------
@@ -184,6 +207,57 @@ async def test_the_loaders_two_endpoint_merge_indexes_BOTH_endpoints(adapter):
     )
 
     _assert_index_backed(plan, expected_scans=2, context="loader edge MERGE")
+
+
+# ----------------------------------------------------------------------
+# The property indexes — what a document prune filters on (#11)
+# ----------------------------------------------------------------------
+
+# The homelab prune (scripts/cognee_stores.py) sends these shapes, with the id
+# list inline. It does not go through the adapter, so it has no emitted query
+# to capture.
+PRUNE_QUERIES = (
+    "MATCH (c:DocumentChunk) WHERE c.document_id IN ['doc-1', 'doc-2'] RETURN c.id",
+    "MATCH (s:TextSummary) WHERE s.source_chunk_id IN ['chunk-1'] DETACH DELETE s",
+    "MATCH (c:DocumentChunk) WHERE c.document_id IN ['doc-1'] DETACH DELETE c",
+)
+
+
+@pytest.mark.parametrize(("label", "prop"), PROPERTY_INDEXES)
+async def test_every_property_lookup_is_index_backed(adapter, label, prop):
+    plan = await _plan(
+        adapter,
+        f"MATCH (n:`{label}`) WHERE n.`{prop}` IN $values RETURN n.id",
+        {"values": ["value-1"]},
+    )
+
+    _assert_index_backed(plan, context=f"{label}.{prop} lookup")
+
+
+@pytest.mark.parametrize("query", PRUNE_QUERIES)
+async def test_the_prune_queries_are_index_backed(adapter, query):
+    _assert_index_backed(await _plan(adapter, query), context="prune")
+
+
+async def test_a_property_lookup_returns_only_the_matching_nodes(adapter):
+    """The plan proves the index is used; this proves the index gives the right rows."""
+    await adapter.query(
+        "CREATE (:DocumentChunk {id: 'chunk-1', document_id: 'doc-1'}), "
+        "(:DocumentChunk {id: 'chunk-2', document_id: 'doc-2'}), "
+        "(:TextSummary {id: 'summary-1', source_chunk_id: 'chunk-1'}), "
+        "(:TextSummary {id: 'summary-2', source_chunk_id: 'chunk-2'})"
+    )
+
+    chunks = await adapter.query(
+        "MATCH (c:DocumentChunk) WHERE c.document_id IN $ids RETURN c.id AS id", {"ids": ["doc-1"]}
+    )
+    summaries = await adapter.query(
+        "MATCH (s:TextSummary) WHERE s.source_chunk_id IN $ids RETURN s.id AS id",
+        {"ids": ["chunk-1"]},
+    )
+
+    assert [row["id"] for row in chunks] == ["chunk-1"]
+    assert [row["id"] for row in summaries] == ["summary-1"]
 
 
 # ----------------------------------------------------------------------

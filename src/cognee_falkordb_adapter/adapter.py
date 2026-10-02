@@ -71,6 +71,7 @@ from .constants import (
     METADATA_LABEL,
     METADATA_NODE_ID,
     NODE_TYPE_LABELS,
+    PROPERTY_INDEXES,
     PROVENANCE_COLUMNS,
 )
 
@@ -379,7 +380,7 @@ class FalkorDBAdapter(GraphDBInterface):
         # adapter instance cannot overwrite each other (the atomic fold path in
         # add_nodes/add_edges does not need it).
         self._source_ref_change_lock = asyncio.Lock()
-        # Set once initialize() has seen every id index in place; see initialize().
+        # Set once initialize() has seen every index in place; see initialize().
         self._indexes_ready = False
 
     # ------------------------------------------------------------------
@@ -442,12 +443,16 @@ class FalkorDBAdapter(GraphDBInterface):
         await self._db.aclose()
 
     async def initialize(self) -> None:
-        """Create both id-index families.
+        """Create both id-index families and the ``PROPERTY_INDEXES``.
 
         🚨 NOTHING ELSE CREATES THESE, AND THE FAILURE IS SILENT. Without them an
         id lookup degrades to an All-Node-Scan — no error, no warning, just a
         graph that gets slower with every node (#68 measured 9.6 ms vs 2.0 ms per
         lookup, and a 2,114 s migration instead of an 84.5 s one).
+
+        The ``PROPERTY_INDEXES`` serve a document prune: it finds chunks by
+        ``document_id`` and summaries by ``source_chunk_id``. Without them each
+        lookup scans every node of the label (#11).
 
         FalkorDB accepts an index on a label that does not exist yet, so there is
         no chicken-and-egg and no reason to defer this to first write.
@@ -457,18 +462,19 @@ class FalkorDBAdapter(GraphDBInterface):
 
         🚨 Runs ONCE per adapter instance. cognee's ``get_graph_engine()`` wraps the
         cached adapter in a fresh handle on every call, and each handle re-runs
-        ``initialize()`` — so without this guard every engine lookup issued
-        ``1 + len(NODE_TYPE_LABELS)`` ``CREATE INDEX`` commands. Each one fails
-        "already indexed", but under cognify write load they queue behind the
-        writes (~1.1 s each measured on cognee_graph, 2026-09-25) and dominated a
-        backfill drain. Safe because nothing in this adapter drops the graph key
-        (``delete_graph`` keeps it — and its indexes — on purpose).
+        ``initialize()`` — so without this guard every engine lookup issued one
+        ``CREATE INDEX`` command for each index. Each one fails "already indexed",
+        but under cognify write load they queue behind the writes (~1.1 s each
+        measured on cognee_graph, 2026-09-25) and dominated a backfill drain. Safe
+        because nothing in this adapter drops the graph key (``delete_graph`` keeps
+        it — and its indexes — on purpose).
         """
         if self._indexes_ready:
             return
-        for label in (BASE_LABEL, *NODE_TYPE_LABELS):
+        id_indexes = [(label, "id") for label in (BASE_LABEL, *NODE_TYPE_LABELS)]
+        for label, prop in (*id_indexes, *PROPERTY_INDEXES):
             try:
-                await self._graph.create_node_range_index(label, "id")
+                await self._graph.create_node_range_index(label, prop)
             except Exception as exc:  # already indexed — the normal path
                 if "already indexed" not in str(exc).lower():
                     raise
