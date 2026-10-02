@@ -25,6 +25,7 @@ from cognee_falkordb_adapter.adapter import (
     _dedupe,
     _quote,
     _strip_provenance,
+    _typed_read_is_faster,
 )
 
 
@@ -163,3 +164,24 @@ def test_strip_provenance_returns_a_plain_dict():
     stripped = _strip_provenance(source)
     stripped["extra"] = 1
     assert "extra" not in source
+
+
+# ----------------------------------------------------------------------
+# Typed anchored edge reads — the read selection of _anchored_edge_rows
+# ----------------------------------------------------------------------
+
+
+# (node pairs, start nodes, typed read is faster), measured on the copy of the
+# live graph (19,944 relationship types), wall time of the full method call.
+@pytest.mark.parametrize(
+    ("pairs", "anchors", "typed"),
+    [
+        (160, 20, False),  # 20 entities: untyped 1.4 s
+        (446, 1, False),  # an EntityType with 470 edges: untyped 3.1 s, typed 3.1 s
+        (692, 12, True),  # the 12 nodes of a document: untyped 4.7 s, typed 3.0 s
+        (41_481, 1, True),  # an EntityType with 44k edges: untyped 282 s, typed 19 s
+        (151_856, 1, True),  # a NodeSet with 155k edges: untyped > 300 s, typed 61 s
+    ],
+)
+def test_typed_read_selection(pairs, anchors, typed):
+    assert _typed_read_is_faster(pairs, anchors) is typed

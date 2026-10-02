@@ -147,7 +147,9 @@ relationship **timed out at 30 s**. So edges are not scanned. They are the union
 of:
 
 1. **anchored** — edges incident to the document's own nodes, seeded by the
-   `__Node__.id` index (synthetic 136k/700k: 208 ms vs 7.4 s for the scan);
+   `__Node__.id` index (synthetic 136k/700k: 208 ms vs 7.4 s for the scan).
+   From 0.5.1, this read is typed when the nodes have many edges — see
+   [typed anchored edge reads](#many-relationship-types-typed-anchored-edge-reads-051);
 2. **chunk sweep** — every `DocumentChunk -> DocumentChunk` edge (10.8 ms live).
 
 🚨 **That is complete only under an invariant of cognee's write path: an edge
@@ -168,6 +170,114 @@ covers.
 own D and that is not chunk→chunk is not returned. No 1.5.4 or 1.6.1 write path
 makes one; if a future one does, the edge keeps a stale ref (a leak, never an
 over-delete) and `delete_by_dataset` still removes it.
+
+### Beyond the interface: a bounded read (0.5.0)
+
+Two cognee 1.6.1 calls to `get_graph_data()` read every node and edge with all
+properties: the GRAPH_COMPLETION search and `_cleanup_orphaned_edge_types`. On
+the live graph (~160k nodes / ~704k edges), these two calls caused 79 gunicorn
+OOM kills (8 GiB limit) and 3 FalkorDB OOM kills (4 GiB limit). The method below
+is not on `GraphDBInterface`, and it replaces the search call. For the cleanup
+call, see the note at the end of this section.
+
+**`get_id_filtered_graph_data(target_ids)`** returns the edges that touch
+`target_ids` and the endpoints of those edges. The shape is that of
+`get_graph_data`, without provenance. `CogneeGraph._get_full_or_id_filtered_graph`
+calls it when the adapter class has it; without it, each GRAPH_COMPLETION search
+reads the full graph. The semantics are those of cognee 1.6.1's neo4j and ladybug
+adapters, and `tests/test_id_filtered_graph_data.py` compares the result with
+them. The edge read and the node read both start from the `__Node__.id` index
+(`test_indexes.py`).
+
+⚠ The read is edge-driven, as upstream: a target with no edges is not returned.
+If no target has an edge, the result is empty, and cognee then falls back to
+`get_graph_data()` — the full read. This adapter keeps that upstream behaviour.
+
+⚠ **0.5.1 removes `get_existing_edge_retrieval_texts(texts)`.** 0.5.0 added it
+for `_cleanup_orphaned_edge_types`: it returned the requested texts that are the
+retrieval text of an edge. It scanned all edges two times, with two untyped
+patterns joined by UNION. Measured on a copy of the live graph (187,105 nodes,
+756,107 edges, 19,944 relationship types): one call took 40 to 55 min, and each
+write waited until the call ended. A typed rewrite is not faster. One typed scan
+costs approximately 105 ms for each type, also for a type with one edge, so one
+pass takes approximately 2,000 s. A pattern with more types costs the same for
+each type, and a pattern with more than 255 types gives wrong results (see the
+255-type hazard below). Thus the homelab cognee patch makes the EdgeType cleanup
+a no-op and does not call this method.
+
+### Many relationship types: typed anchored edge reads (0.5.1)
+
+🚨 cognee writes each relationship name from the LLM as a FalkorDB edge type. A
+copy of the live graph (2026-10: 187k nodes, 756k edges) has **19,944 types**.
+FalkorDB v4.20.7 finds the edges of an untyped pattern `(a)-[r]-(b)` with one
+lookup in the matrix of each type, for each node pair
+(`Graph_GetEdgesConnectingNodes` with `GRAPH_NO_RELATION`). Measured on the copy:
+approximately 6.4 ms for each pair, in both directions. A typed pattern
+`(a)-[r:A|B]-(b)` does one matrix multiplication for each type and each batch of
+16 start nodes. Its cost does not increase with the degree of the start nodes.
+
+`get_id_filtered_graph_data` and the anchored read of
+`find_edge_source_refs_by_document` start from known node ids. A search target
+or a node that a document owns can have many edges: an EntityType has up to
+44k `is_a` edges, and a NodeSet has up to 155k `belongs_to_set` edges. These
+reads first count the node pairs of the start nodes (a pattern without an edge
+variable reads only the adjacency matrix: 2 ms for 900 pairs). Then:
+
+- **Few pairs** (`pairs <= 400 + 70 x ceil(start nodes / 16)`, the measured
+  break-even): one untyped query, as in 0.5.0.
+- **Many pairs**: one typed query for each group of types from
+  `CALL db.meta.stats()`. A type with more than 1000 edges has its own group,
+  and the other types are in groups of 255. Each query is short, so writes can
+  run between them. The rows are thus not one snapshot of the graph.
+
+🚨 **A typed pattern takes 255 types or fewer — a FalkorDB bug with no error.**
+FalkorDB keeps the type count of a pattern in a `uint8_t`
+(`EdgeTraverseCtx.n_rels`, set in `EdgeTraverseCtx_New`). Measured on v4.20.7: a
+pattern with 256 types matched every edge of the graph, and a pattern with 300
+types matched the edges of only 44 types. Code that puts many relationship types
+into one pattern must keep each group at 255 types or fewer. `tests/test_id_filtered_graph_data.py` has a hub
+with 600 types that fails if a group has more than 255 types.
+
+Measured on a copy of the live graph (FalkorDB v4.20.7 in Docker, 2 CPUs, Mac),
+wall time of the full method call. "Write wait" is the longest time that a
+one-node write, sent each second during the call, waited for the graph.
+
+| call | start nodes | node pairs | 0.5.0 | 0.5.1 | slowest query (0.5.1) | write wait (0.5.0 / 0.5.1) |
+|---|---:|---:|---:|---:|---:|---:|
+| `get_id_filtered_graph_data`, 20 entities | 20 | 160 | 1.4 s | 1.2 s (untyped) | 1.1 s | 1.1 s / 0.1 s |
+| same, 100 mixed search targets | 100 | 892 | 6.5 s | 5.6 s | 0.6 s | 5.7 s / 0.1 s |
+| same, an EntityType with 470 edges | 1 | 446 | 3.1 s | 3.1 s (untyped) | 3.0 s | 2.0 s / 2.4 s |
+| same, an EntityType with 44k edges | 1 | 41,481 | 282 s | 19 s | 8.2 s | 266 s / 0.1 s |
+| same, a NodeSet with 155k edges | 1 | 151,856 | > 300 s (timeout) | 61 s | 31 s ¹ | 300 s / 0.7 s |
+| `find_edge_source_refs_by_document`, document A | 12 | 692 | 4.7 s | 3.0 s | 0.5 s | 4.3 s / 0.2 s |
+| same, document B | 12 | 16,928 | 103 s | 3.0 s | 0.5 s | 102 s / 0.1 s |
+| same, document C | 18 | 158,699 | > 300 s (timeout) | 4.2 s | 0.6 s | 300 s / 0.0 s |
+
+¹ The reply has 155k edges and then 152k nodes with all properties. The time is
+mostly the Python parse of the reply; the method must return all of them.
+
+Where 0.5.0 finished, both versions returned the same edges. With the production
+`TIMEOUT_MAX` of 300 s, the two 0.5.0 calls marked "timeout" fail.
+
+⚠ **A full edge scan cannot be made fast this way.** A typed scan over all nodes
+costs approximately 105 ms for each type, also for a type with one edge
+(187k nodes / 16 = 11.7k matrix multiplications). For the 19,104 types that have
+edges, one pass takes approximately 2,000 s; the untyped full read took 2,447 s.
+Thus these reads keep their untyped patterns:
+
+- full scans: `get_graph_data`, `get_triplets_batch`, `get_graph_metrics`,
+  `get_filtered_graph_data`, `find_edges_by_source_ref`,
+  `find_edge_source_refs_by_dataset`, `find_edge_source_refs_by_pipeline_run`,
+  and the chunk sweep of `find_edge_source_refs_by_document` (it costs per
+  chunk-to-chunk pair; the copy has none);
+- reads from one node or from a known edge: `get_edges`, `get_connections`,
+  `get_neighborhood`, `get_nodeset_subgraph`, `has_edge`, `has_edges`,
+  `get_edge_delete_data`, `delete_edge_triples`, and the provenance read and
+  write of `attach_edge_source_refs` / `remove_edge_source_refs`. The last six
+  know the type of each edge, but they match it with `type(r) = e.rel` on an
+  untyped pattern, so each edge costs one lookup for each type. Measured:
+  `get_edge_delete_data` for 200 `contains` edges takes 5.5 s; the same read
+  with a typed pattern takes 0.03 s.
 
 ## Three things that will bite
 

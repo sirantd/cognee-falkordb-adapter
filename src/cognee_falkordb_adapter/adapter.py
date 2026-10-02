@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable
 from contextlib import nullcontext
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Type, Union
 from uuid import UUID
@@ -82,6 +83,50 @@ NodeData = Dict[str, Any]
 EdgeData = Tuple[str, str, str, Dict[str, Any]]
 
 _PROVENANCE_KEY_SET = frozenset(PROVENANCE_COLUMNS)
+
+# --- edge reads that start from node ids -----------------------------------------
+#
+# 🚨 cognee uses each relationship name from the LLM as the FalkorDB edge type.
+# Thus a cognee graph has many types: 19,944 on a copy of the live graph
+# (2026-10: 187k nodes, 756k edges). Costs measured on that copy, FalkorDB v4.20.7:
+#
+# * An untyped pattern ``(a)-[r]-(b)`` finds the edges of each node pair with one
+#   lookup in the matrix of EACH type (``Graph_GetEdgesConnectingNodes`` with
+#   ``GRAPH_NO_RELATION``): approximately 6.4 ms for each pair, both directions.
+# * A typed pattern ``(a)-[r:A|B]-(b)`` does one matrix multiplication for each
+#   type and each batch of 16 start nodes (``BATCH_SIZE`` in
+#   ``op_conditional_traverse.c``). Then each matched pair gets one lookup for
+#   each type of the pattern.
+#
+# So the untyped read costs pairs x types, and the typed read costs batches x
+# types. A node with many edges is slow untyped (an EntityType with 44k edges:
+# 272 s), and a few nodes of normal degree are faster untyped.
+# ``_anchored_edge_rows`` counts the pairs first and selects the read. A pattern
+# without an edge variable reads only the adjacency matrix: 2 ms for 900 pairs.
+#
+# 🚨 A typed pattern must have 255 types or fewer. FalkorDB keeps the type count
+# of a pattern in a ``uint8_t`` (``EdgeTraverseCtx_New``). Measured: a pattern
+# with 256 types matched every edge of the graph, and a pattern with 300 types
+# matched only the edges of 44 of them. FalkorDB gives no error.
+_TRAVERSE_BATCH = 16
+# Measured end to end on the copy: the typed read costs approximately 2.5 s
+# (``db.meta.stats()`` and 96 queries) plus 0.45 s for each further batch of
+# start nodes. The untyped read costs 6.4 ms for each pair. The ratio does not
+# change with the type count, because both costs increase with it.
+_TYPED_READ_BASE_PAIRS = 400
+_TYPED_READ_PAIRS_PER_BATCH = 70
+_TYPE_GROUP_SIZE = 255
+# A typed pattern looks up each matched pair once for each of its types. A type
+# with more edges than this gets a pattern of its own, so its pairs are not
+# looked up 255 times. The live graph has 17 such types.
+_TYPE_GROUP_SINGLE_EDGES = 1000
+
+
+def _typed_read_is_faster(pairs: int, anchor_count: int) -> bool:
+    """True if the typed read of ``anchor_count`` start nodes is faster than the
+    untyped read of their ``pairs`` node pairs."""
+    batches = -(-anchor_count // _TRAVERSE_BATCH)
+    return pairs > _TYPED_READ_BASE_PAIRS + _TYPED_READ_PAIRS_PER_BATCH * batches
 
 
 def _strip_provenance(properties: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -908,6 +953,76 @@ class FalkorDBAdapter(GraphDBInterface):
             for row in rows
         ]
 
+    async def _relationship_type_groups(self) -> Optional[List[List[str]]]:
+        """The relationship types that have edges, in groups for typed patterns.
+
+        ``db.meta.stats()`` gives each type and its edge count in one call
+        (approximately 0.5 s for 19,944 types). A type with more than
+        ``_TYPE_GROUP_SINGLE_EDGES`` edges gets a group of its own. The other
+        types go into groups of ``_TYPE_GROUP_SIZE``.
+
+        Returns None if a type name has a backtick or a NUL. ``_quote`` must
+        remove these characters, so a pattern cannot name that type. Then the
+        caller must use the untyped read, which is correct for all types.
+        """
+        rows = await self.query("CALL db.meta.stats()")
+        counts: Dict[str, int] = rows[0]["relTypes"] if rows else {}
+        if any("`" in name or "\x00" in name for name in counts):
+            return None
+        groups = [[name] for name, count in counts.items() if count > _TYPE_GROUP_SINGLE_EDGES]
+        small = [name for name, count in counts.items() if 0 < count <= _TYPE_GROUP_SINGLE_EDGES]
+        groups += [
+            small[start : start + _TYPE_GROUP_SIZE]
+            for start in range(0, len(small), _TYPE_GROUP_SIZE)
+        ]
+        return groups
+
+    async def _anchored_edge_rows(
+        self,
+        query_for: Callable[[str], str],
+        anchor_ids: List[str],
+        params: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Run an edge read that starts from the nodes with ``a.id IN $anchor_ids``.
+
+        ``query_for(pattern)`` must return the read, with ``pattern`` as the
+        relationship pattern of ``a``: ``[r]``, or ``[r:`A`|`B`]`` for one type
+        group. The read must keep ``DISTINCT r``. The type groups do not share a
+        type, so the rows of two groups do not have the same edge.
+
+        The cost model is above ``_TRAVERSE_BATCH``. This method counts the
+        node pairs of the anchors with an untyped pattern that has no edge
+        variable, and then selects the read with ``_typed_read_is_faster``:
+
+        * Few pairs: one untyped query, as before.
+        * Many pairs: one typed query for each group of
+          ``_relationship_type_groups``. Each query is short, so a write can
+          run between two of them. Thus the rows are not one snapshot of the
+          graph: an edge that a concurrent write adds or removes can be absent
+          or present.
+        """
+        all_params = {**(params or {}), "anchor_ids": anchor_ids}
+        counted = await self.query(
+            f"""
+            MATCH (a:{_quote(BASE_LABEL)})--(:{_quote(BASE_LABEL)})
+            WHERE a.id IN $anchor_ids
+            RETURN count(*) AS pairs
+            """,
+            {"anchor_ids": anchor_ids},
+        )
+        pairs = counted[0]["pairs"] if counted else 0
+        groups = None
+        if _typed_read_is_faster(pairs, len(anchor_ids)):
+            groups = await self._relationship_type_groups()
+        if groups is None:
+            return await self.query(query_for("[r]"), all_params)
+
+        rows: List[Dict[str, Any]] = []
+        for group in groups:
+            pattern = "[r:" + "|".join(_quote(name) for name in group) + "]"
+            rows += await self.query(query_for(pattern), all_params)
+        return rows
+
     # ------------------------------------------------------------------
     # Graph provenance
     #
@@ -1379,16 +1494,19 @@ class FalkorDBAdapter(GraphDBInterface):
         node_ids = list(await self.find_node_source_refs_by_document(dataset_id, data_id))
         rows = []
         if node_ids:
-            rows += await self.query(
-                f"""
-                MATCH (a:{_quote(BASE_LABEL)})-[r]-(:{_quote(BASE_LABEL)})
-                WHERE a.id IN $node_ids AND $dataset_id IN coalesce(r.source_dataset_ids, [])
+            # A document owns shared nodes too (an EntityType, a NodeSet) that can
+            # have 100k edges. ``_anchored_edge_rows`` then reads with typed patterns.
+            rows += await self._anchored_edge_rows(
+                lambda pattern: f"""
+                MATCH (a:{_quote(BASE_LABEL)})-{pattern}-(:{_quote(BASE_LABEL)})
+                WHERE a.id IN $anchor_ids AND $dataset_id IN coalesce(r.source_dataset_ids, [])
                 WITH DISTINCT r
                 WITH r, [key IN coalesce(r.source_ref_keys, []) WHERE key CONTAINS $data_id] AS keys
                 WHERE size(keys) > 0
                 RETURN startNode(r).id AS s, endNode(r).id AS t, type(r) AS rel, keys
                 """,
-                {**params, "node_ids": node_ids},
+                node_ids,
+                params,
             )
         rows += await self.query(
             f"""
@@ -1640,6 +1758,80 @@ class FalkorDBAdapter(GraphDBInterface):
             )
 
         logger.info("Retrieved %d nodes and %d edges", len(nodes), len(edges))
+        return (nodes, edges)
+
+    async def get_id_filtered_graph_data(
+        self, target_ids: list[str]
+    ) -> tuple[list[Node], list[EdgeData]]:
+        """The edges that touch ``target_ids``, and the endpoints of those edges.
+
+        Not on ``GraphDBInterface``. ``CogneeGraph._get_full_or_id_filtered_graph``
+        calls it when the adapter class has it; without it, GRAPH_COMPLETION search
+        reads the full graph through ``get_graph_data``.
+
+        The semantics are those of cognee 1.6.1's neo4j and ladybug adapters. The
+        read is edge-driven: an edge is returned when one endpoint id is in
+        ``target_ids``, and a node is returned only as an endpoint of such an edge.
+        A target with no edges is not returned. If no target has an edge, the
+        result is empty and cognee falls back to ``get_graph_data``. The scope and
+        the shape are those of ``get_graph_data``: both endpoints carry the shared
+        label, and the provenance properties are removed.
+
+        The edge read starts from the ``__Node__.id`` index. ``DISTINCT r`` removes
+        the second match of an edge whose two endpoints are both targets. The node
+        read is a second index lookup, so each node is sent one time and not one
+        time for each of its edges.
+
+        A search target can have many edges (an EntityType node can have 40k
+        ``is_a`` edges). ``_anchored_edge_rows`` then reads the edges with typed
+        patterns, because the untyped read costs one lookup for each type and
+        each pair.
+        """
+        if not target_ids:
+            logger.warning("No target IDs provided for ID-filtered graph retrieval.")
+            return [], []
+
+        edge_rows = await self._anchored_edge_rows(
+            lambda pattern: f"""
+            MATCH (a:{_quote(BASE_LABEL)})-{pattern}-(:{_quote(BASE_LABEL)})
+            WHERE a.id IN $anchor_ids
+            WITH DISTINCT r
+            RETURN startNode(r).id AS source, endNode(r).id AS target,
+                   type(r) AS type, properties(r) AS properties
+            """,
+            [str(target_id) for target_id in target_ids],
+        )
+        if not edge_rows:
+            return [], []
+
+        endpoint_ids = _dedupe(
+            endpoint for row in edge_rows for endpoint in (row["source"], row["target"])
+        )
+        node_rows = await self.query(
+            f"""
+            MATCH (n:{_quote(BASE_LABEL)}) WHERE n.id IN $ids
+            RETURN properties(n) AS properties
+            """,
+            {"ids": endpoint_ids},
+        )
+        nodes = [
+            (properties["id"], properties)
+            for properties in (_strip_provenance(row["properties"]) for row in node_rows)
+        ]
+
+        edges = []
+        for row in edge_rows:
+            properties = _strip_provenance(row["properties"]) or {}
+            edges.append(
+                (
+                    properties.get("source_node_id", row["source"]),
+                    properties.get("target_node_id", row["target"]),
+                    row["type"],
+                    properties,
+                )
+            )
+
+        logger.info("ID-filtered retrieval: %d nodes and %d edges", len(nodes), len(edges))
         return (nodes, edges)
 
     async def get_neighborhood(
