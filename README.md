@@ -105,6 +105,23 @@ Verified to fail as intended: with `initialize()` skipped, every shape —
 shared-label lookup, type-label lookup and the loader's two-endpoint MERGE —
 degrades to `Node By Label Scan`.
 
+### Property indexes for a document prune (0.5.2)
+
+`initialize()` also creates range indexes on `DocumentChunk.document_id` and
+`TextSummary.source_chunk_id` (`PROPERTY_INDEXES` in `constants.py`). A document
+prune finds the chunks of a document by `document_id`, and the summary of each
+chunk by `source_chunk_id`. Without these indexes, each lookup is a
+`Node By Label Scan` of every node of that label (#11).
+
+`test_indexes.py` asserts `Node By Index Scan` for the three query shapes of the
+homelab prune, and for an `IN $values` lookup on each property index. With the
+0.5.1 `initialize()`, all of these tests fail with `Node By Label Scan`.
+
+On a graph that exists, the first `initialize()` after the upgrade adds the two
+indexes. `CREATE INDEX` returns at once, and FalkorDB builds the index in the
+background (`db.indexes()` shows `UNDER CONSTRUCTION`). On FalkorDB v4.20.7 with
+28,800 synthetic nodes for each label, each build took approximately 0.11 s.
+
 ## Scope: 41 methods, not 48
 
 `GraphDBInterface` declares 48 public methods. Counted against cognee 1.4.1 and
