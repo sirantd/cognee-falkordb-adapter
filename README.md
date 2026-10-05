@@ -351,7 +351,7 @@ readable, but there is no reason to lose the rest of the extraction text.
 ```bash
 pip install -e '.[test]'
 pytest -s -m "not integration"           # surface, signatures, port helpers, the pin — no server
-docker run -d --rm -p 6379:6379 falkordb/falkordb:v4.20.7    # the version CI uses
+docker run -d --rm -p 6379:6379 falkordb/falkordb:v4.22.0    # the version CI uses
 pytest -m integration                    # port delta, indexes and the contract suite
 FALKORDB_REQUIRED=1 pytest tests/test_contract.py -v   # the gate, as CI runs it
 ```
