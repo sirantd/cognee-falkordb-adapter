@@ -72,8 +72,19 @@ dependencies = [
 # create_chunk_associations, the node-id migrations) is semantically unchanged, so
 # the by_document invariant in the README still holds. 1.6.0 is skipped: same
 # suite, and production goes straight to 1.6.1.
+#
+# 📌 1.6.1 -> 1.6.3 is interface-inert for this adapter. The contract suite file
+# has no diff, and GraphDBInterface keeps its 21 abstractmethods. It gained three
+# NON-abstract methods with defaults: get_graph_counts (falls back to
+# get_graph_metrics, the same call the graph-summary endpoint made at 1.6.1),
+# get_timestamps_in_range (the default reads get_graph_data, the full graph) and
+# get_temporal_anchors (the default walks get_neighborhood). Only the TEMPORAL
+# search calls the two temporal methods. The edge-ref writers (add_data_points,
+# chunk_ownership, create_chunk_associations, the node-id migrations) have no
+# diff, so the by_document invariant in the README still holds. 1.6.2 is
+# skipped: production goes straight to 1.6.3.
 test = [
-  "cognee==1.6.1",
+  "cognee==1.6.3",
   "pytest>=8",
   "pytest-asyncio>=0.24",
 ]
