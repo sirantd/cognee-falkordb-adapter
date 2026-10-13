@@ -83,8 +83,15 @@ dependencies = [
 # chunk_ownership, create_chunk_associations, the node-id migrations) have no
 # diff, so the by_document invariant in the README still holds. 1.6.2 is
 # skipped: production goes straight to 1.6.3.
+#
+# 📌 1.6.3 -> 1.6.4 is interface-inert for this adapter. The tag diff is 14
+# files, and no file under databases/graph/ changed: graph_db_interface.py,
+# supported_databases.py and the contract suite file have no diff. The edge-ref
+# writers have no diff, so the by_document invariant in the README still holds.
+# The release changes the pgvector and LanceDB vector search (the search no
+# longer selects the vector column) and the Turso dialect, not the graph path.
 test = [
-  "cognee==1.6.3",
+  "cognee==1.6.4",
   "pytest>=8",
   "pytest-asyncio>=0.24",
 ]
