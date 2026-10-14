@@ -17,9 +17,8 @@ not a production adapter.
 ## Status
 
 **Production — deployed and serving.** The TrueNAS deployment pins this
-adapter at commit `acdd413` (0.5.2) under cognee `1.6.3`, deployed 2026-10-08.
-`main` gates cognee `1.6.4` with the same adapter code; the deployment moves to
-it with the homelab cognee 1.6.4 bump. All 41 methods are implemented
+adapter at commit `b053f7b` (0.5.2) under cognee `1.6.4`, deployed 2026-10-14 —
+the same cognee the contract gate runs. All 41 methods are implemented
 (the burn-down,
 `pytest -s`, reads `0/41`), ported from cognee's in-core Neo4j adapter with APOC
 replaced, the GDS block dropped, and the two `*_node_truth_state` methods taken
