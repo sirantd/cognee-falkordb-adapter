@@ -90,8 +90,18 @@ dependencies = [
 # writers have no diff, so the by_document invariant in the README still holds.
 # The release changes the pgvector and LanceDB vector search (the search no
 # longer selects the vector column) and the Turso dialect, not the graph path.
+#
+# 📌 1.6.4 -> 1.6.5 is interface-inert for this adapter. The tag diff is 210
+# commits, but under databases/graph/ only the in-core adapters (ladybug, neo4j,
+# neptune, turso) and one docstring of graph_db_interface.py changed. The
+# interface keeps its 21 abstractmethods, and the contract suite file has no
+# diff. add_data_points lost only the triplet-embedding branch (SDK-1115, off by
+# default); chunk_ownership, create_chunk_associations and the node-id
+# migration have no diff, so the by_document invariant in the README still
+# holds. cognee's own pins move: litellm >=1.102.2 and an alembic revision that
+# adds embedding-token columns. Neither reaches the graph path.
 test = [
-  "cognee==1.6.4",
+  "cognee==1.6.5",
   "pytest>=8",
   "pytest-asyncio>=0.24",
 ]
