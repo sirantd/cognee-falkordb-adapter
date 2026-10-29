@@ -123,6 +123,12 @@ def test_the_gate_runs_falkordb_and_only_falkordb():
     Without the override the suite would run its own ladybug/postgres/neo4j
     params — ladybug is installed, so it would pass, and A5 would be green
     having tested a different backend entirely.
+
+    📌 From cognee 1.6.6 the suite's fixture lives in the package's
+    ``conftest.py``, not in the suite module. pytest loads no ``conftest.py``
+    from ``site-packages``, so the gate's fixture is the only provider; the
+    ``getattr`` keeps the check honest if the fixture ever moves back.
     """
     assert gate.PROVIDERS == ["falkordb"]
-    assert gate.graph_provenance_adapter is not upstream.graph_provenance_adapter
+    assert "graph_provenance_adapter" in vars(gate)
+    assert gate.graph_provenance_adapter is not getattr(upstream, "graph_provenance_adapter", None)

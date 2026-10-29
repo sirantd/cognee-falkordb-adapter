@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cognee-falkordb-adapter"
-version = "0.5.2"
+version = "0.5.3"
 description = "A provenance-complete FalkorDB graph adapter for cognee"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -100,8 +100,21 @@ dependencies = [
 # migration have no diff, so the by_document invariant in the README still
 # holds. cognee's own pins move: litellm >=1.102.2 and an alembic revision that
 # adds embedding-token columns. Neither reaches the graph path.
+#
+# 🚨 1.6.5 -> 1.6.6 is NOT interface-inert for this adapter. The interface keeps
+# its 21 abstractmethods, but get_filtered_graph_data gains a keyword-only
+# `include_edges: bool = True`. cognee calls it with include_edges=False to read
+# FactConflict nodes on every RAG_COMPLETION, CHUNKS, GRAPH_COMPLETION and
+# HYBRID_COMPLETION search (retrieval/utils/resolved_context.py, reached from
+# the four retrievers with no try). Without the parameter every such search
+# raises TypeError. 0.5.3 adds it and skips the edge query when it is False.
+# The contract suite keeps its 20 cases; 1.6.6 only moved the suite's own
+# fixture plumbing into a conftest.py, which the shadowed fixture replaces.
+# add_data_points changed only which nodes it embeds; its graph writes,
+# chunk_ownership and create_chunk_associations have no diff, so the
+# by_document invariant in the README still holds.
 test = [
-  "cognee==1.6.5",
+  "cognee==1.6.6",
   "pytest>=8",
   "pytest-asyncio>=0.24",
 ]
