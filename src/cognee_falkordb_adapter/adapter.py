@@ -1988,13 +1988,22 @@ class FalkorDBAdapter(GraphDBInterface):
         return nodes, edges
 
     async def get_filtered_graph_data(
-        self, attribute_filters: List[Dict[str, List[Union[str, int]]]]
+        self,
+        attribute_filters: List[Dict[str, List[Union[str, int]]]],
+        *,
+        include_edges: bool = True,
     ) -> Tuple[List[Node], List[EdgeData]]:
         """Nodes whose attributes match every filter, and the edges between them.
 
         ⚠ Values are **parameterized**, unlike the seed, which interpolates them
         into the query text with hand-rolled quoting — one apostrophe in an
         entity name and that query is a syntax error at best.
+
+        🚨 ``include_edges=False`` (cognee 1.6.6) must skip the edge query, not
+        filter its result. cognee 1.6.6 reads the ``FactConflict`` nodes this way on
+        every RAG, chunk and graph search, and the edge query is an untyped
+        ``-[r]->`` expansion: on a graph with many relationship types it costs one
+        lookup per node pair and type.
         """
         if not attribute_filters:
             return [], []
@@ -2021,6 +2030,8 @@ class FalkorDBAdapter(GraphDBInterface):
             (properties["id"], properties)
             for properties in (_strip_provenance(row["properties"]) for row in node_rows)
         ]
+        if not include_edges:
+            return nodes, []
 
         edge_rows = await self.query(
             f"""

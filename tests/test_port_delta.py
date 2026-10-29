@@ -349,6 +349,33 @@ async def test_filtered_graph_data_parameterizes_its_values(adapter):
     assert [properties["name"] for _, properties in nodes] == ["O'Brien"]
 
 
+async def test_filtered_graph_data_without_edges_runs_only_the_node_query(adapter, monkeypatch):
+    """cognee 1.6.6 reads FactConflict nodes with ``include_edges=False`` on every
+    search. The untyped edge query must not run at all, not run and be discarded."""
+    a, b = _Ent(id=uuid4(), name="A"), _Ent(id=uuid4(), name="B")
+    await adapter.add_nodes([a, b])
+    await adapter.add_edges([(str(a.id), str(b.id), "knows", {"edge_text": "t"})])
+
+    queries = []
+    real_query = adapter.query
+
+    async def recording_query(query, params=None):
+        queries.append(query)
+        return await real_query(query, params)
+
+    monkeypatch.setattr(adapter, "query", recording_query)
+    nodes, edges = await adapter.get_filtered_graph_data(
+        [{"name": ["A", "B"]}], include_edges=False
+    )
+
+    assert sorted(properties["name"] for _, properties in nodes) == ["A", "B"]
+    assert edges == []
+    assert len(queries) == 1 and "-[r]->" not in queries[0]
+
+    _, edges = await adapter.get_filtered_graph_data([{"name": ["A", "B"]}])
+    assert [edge[2] for edge in edges] == ["knows"]
+
+
 async def test_remove_belongs_to_set_tags_also_prunes_the_stale_nodeset_edge(adapter):
     """The contract suite checks the property; the edge half is ours to prove.
 
