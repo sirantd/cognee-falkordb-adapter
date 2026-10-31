@@ -451,6 +451,53 @@ async def test_get_neighborhood_filters_by_edge_type(adapter, triangle):
     assert {properties["name"] for _, properties in nodes} == {"a", "b"}
 
 
+async def test_get_neighborhood_follows_every_listed_type(adapter, triangle):
+    nodes, _ = await adapter.get_neighborhood(
+        [triangle["a"]], depth=2, edge_types=["knows", "likes"]
+    )
+    assert {properties["name"] for _, properties in nodes} == {"a", "b", "c"}
+
+
+async def test_get_neighborhood_returns_every_edge_between_its_nodes(adapter, triangle):
+    """``edge_types`` selects the neighbours, not the returned edges: cognee's
+    conflict reader expects the induced edges of every type, as the in-core
+    adapters return them."""
+    await adapter.add_edges([(triangle["b"], triangle["a"], "trusts", {"edge_text": "ba"})])
+
+    _, edges = await adapter.get_neighborhood([triangle["a"]], depth=1, edge_types=["knows"])
+
+    assert sorted(edge[2] for edge in edges) == ["knows", "trusts"]
+
+
+async def test_get_neighborhood_reads_no_untyped_edge_variable_across_the_set(
+    adapter, triangle, monkeypatch
+):
+    """🚨 On the live graph (19,944 types) a path filtered by ``type(r)`` took 4.0 s
+    for 10 seeds and the typed path 1.5 ms. Only the per-pair read keeps ``[r]``."""
+    queries = []
+    real_query = adapter.query
+
+    async def recording_query(query, params=None):
+        queries.append(query)
+        return await real_query(query, params)
+
+    monkeypatch.setattr(adapter, "query", recording_query)
+    await adapter.get_neighborhood([triangle["a"]], depth=2, edge_types=["knows"])
+
+    assert any("[:`knows`*1..2]" in query for query in queries)
+    assert not any("type(r) IN" in query for query in queries)
+    untyped = [query for query in queries if "-[r]->" in query]
+    assert len(untyped) == 1 and "UNWIND $pairs" in untyped[0]
+
+
+async def test_get_neighborhood_falls_back_for_a_type_a_pattern_cannot_name(adapter, triangle):
+    """A backtick cannot be quoted, so such a type goes through the untyped read."""
+    nodes, _ = await adapter.get_neighborhood(
+        [triangle["a"]], depth=2, edge_types=["knows", "has`tick"]
+    )
+    assert {properties["name"] for _, properties in nodes} == {"a", "b"}
+
+
 async def test_get_nodeset_subgraph_or_takes_every_neighbour(adapter, triangle):
     nodes, edges = await adapter.get_nodeset_subgraph(_Ent, ["a", "c"])
 

@@ -315,6 +315,27 @@ async def test_the_id_filtered_read_the_adapter_emits_is_index_backed(adapter):
         )
 
 
+async def test_the_neighborhood_read_the_adapter_emits_is_index_backed(adapter):
+    """cognee 1.6.6 calls ``get_neighborhood`` on every RAG and CHUNKS search. Every
+    read it sends must start from the id index: the path, the node read, the pair
+    read and the per-pair edge read."""
+    source, target = uuid4(), uuid4()
+    await adapter.add_nodes([_Ent(id=source, name="A"), _Ent(id=target, name="B")])
+    await adapter.add_edge(str(source), str(target), "conflict_cites")
+
+    emitted = await _emitted(
+        adapter,
+        lambda: adapter.get_neighborhood([str(source)], edge_types=["conflict_cites"]),
+    )
+
+    assert len(emitted) == 4, "expected a path, a node read, a pair read and an edge read"
+    for query, params in emitted:
+        plan = await _plan(adapter, query, params)
+        for forbidden in FORBIDDEN_SCANS:
+            assert forbidden not in plan, f"{forbidden} in plan [get_neighborhood]:\n{plan}"
+        assert INDEX_SCAN in plan, f"no {INDEX_SCAN} [get_neighborhood]:\n{plan}"
+
+
 async def test_the_typed_id_filtered_read_the_adapter_emits_is_index_backed(
     adapter, monkeypatch
 ):
