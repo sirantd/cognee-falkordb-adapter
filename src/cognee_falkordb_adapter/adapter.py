@@ -130,6 +130,16 @@ def _typed_read_is_faster(pairs: int, anchor_count: int) -> bool:
     return pairs > _TYPED_READ_BASE_PAIRS + _TYPED_READ_PAIRS_PER_BATCH * batches
 
 
+def _can_name_types(names: List[str]) -> bool:
+    """True if one typed pattern can name every type of ``names``.
+
+    ``_quote`` removes a backtick or a NUL, so a pattern cannot name a type that
+    has one, and a pattern holds 255 types or fewer (see ``_TYPE_GROUP_SIZE``).
+    Otherwise the caller must use the untyped read, which is correct for all types.
+    """
+    return len(names) <= _TYPE_GROUP_SIZE and not any("`" in n or "\x00" in n for n in names)
+
+
 def _strip_provenance(properties: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """Return ``properties`` without the four provenance list properties.
 
@@ -1846,22 +1856,43 @@ class FalkorDBAdapter(GraphDBInterface):
         depth: int = 1,
         edge_types: Optional[List[str]] = None,
     ) -> Tuple[List[Node], List[EdgeData]]:
-        """The k-hop subgraph around a set of seed nodes, in ``get_graph_data`` shape."""
+        """The k-hop subgraph around a set of seed nodes, in ``get_graph_data`` shape.
+
+        ``edge_types`` selects the paths to the neighbours. The returned edges are
+        every edge between the collected nodes, of any type, as the in-core
+        adapters return them.
+
+        🚨 cognee 1.6.6 calls this on every RAG and CHUNKS search
+        (``conflict_context.get_chunk_conflicts``: the hits as seeds,
+        ``edge_types=["conflict_cites"]``). Measured on the live graph (19,944
+        types), 10 chunk seeds: a path filtered by ``type(r)`` after the
+        traversal took 4.0 s, the typed path 1.5 ms. See ``_induced_edge_rows``
+        for the edge read.
+        """
         if not node_ids:
             logger.warning("No node IDs provided for neighborhood retrieval.")
             return [], []
 
         seed_ids = [str(node_id) for node_id in node_ids]
         hops = max(1, int(depth))
+        wanted_types = list(dict.fromkeys(edge_types or []))
 
-        if edge_types:
+        if wanted_types and _can_name_types(wanted_types):
+            pattern = "|".join(_quote(name) for name in wanted_types)
+            path_query = f"""
+            MATCH (seed:{_quote(BASE_LABEL)})-[:{pattern}*1..{hops}]-(neighbor)
+            WHERE seed.id IN $node_ids
+            RETURN DISTINCT neighbor.id AS id
+            """
+            params: Dict[str, Any] = {"node_ids": seed_ids}
+        elif wanted_types:
             path_query = f"""
             MATCH path = (seed:{_quote(BASE_LABEL)})-[*1..{hops}]-(neighbor)
             WHERE seed.id IN $node_ids
               AND ALL(r IN relationships(path) WHERE type(r) IN $edge_types)
             RETURN DISTINCT neighbor.id AS id
             """
-            params: Dict[str, Any] = {"node_ids": seed_ids, "edge_types": list(edge_types)}
+            params = {"node_ids": seed_ids, "edge_types": wanted_types}
         else:
             path_query = f"""
             MATCH (seed:{_quote(BASE_LABEL)})-[*1..{hops}]-(neighbor)
@@ -1885,16 +1916,8 @@ class FalkorDBAdapter(GraphDBInterface):
             for properties in (_strip_provenance(row["properties"]) for row in node_rows)
         ]
 
-        edge_rows = await self.query(
-            f"""
-            MATCH (n:{_quote(BASE_LABEL)})-[r]->(m:{_quote(BASE_LABEL)})
-            WHERE n.id IN $ids AND m.id IN $ids
-            RETURN n.id AS source, m.id AS target, type(r) AS type, properties(r) AS properties
-            """,
-            {"ids": all_ids},
-        )
         edges = []
-        for row in edge_rows:
+        for row in await self._induced_edge_rows(all_ids):
             properties = _strip_provenance(row["properties"]) or {}
             edges.append(
                 (
@@ -1906,6 +1929,40 @@ class FalkorDBAdapter(GraphDBInterface):
             )
 
         return (nodes, edges)
+
+    async def _induced_edge_rows(self, node_ids: List[str]) -> List[Dict[str, Any]]:
+        """Every edge between two nodes of ``node_ids``: source, target, type, properties.
+
+        Two reads. An untyped edge variable costs one lookup for each node pair and
+        each type (see ``_TRAVERSE_BATCH``), and ``(n)-[r]->(m)`` looks up every
+        neighbour of ``n``, also the ones outside the set. The first read has no
+        edge variable, so it reads only the adjacency matrix: it finds the
+        connected pairs inside the set. The second read looks up the edges of
+        those pairs only. Measured on the live graph, 10 chunk seeds: the one
+        untyped read took 1.8 s, the pair read 0.9 ms.
+
+        The two reads are not one snapshot: an edge that a concurrent write adds
+        or removes between them can be absent or present.
+        """
+        pair_rows = await self.query(
+            f"""
+            MATCH (n:{_quote(BASE_LABEL)})-->(m:{_quote(BASE_LABEL)})
+            WHERE n.id IN $ids AND m.id IN $ids
+            RETURN DISTINCT n.id AS source, m.id AS target
+            """,
+            {"ids": node_ids},
+        )
+        pairs = [[row["source"], row["target"]] for row in pair_rows]
+        if not pairs:
+            return []
+        return await self.query(
+            f"""
+            UNWIND $pairs AS pair
+            MATCH (n:{_quote(BASE_LABEL)} {{id: pair[0]}})-[r]->(m:{_quote(BASE_LABEL)} {{id: pair[1]}})
+            RETURN n.id AS source, m.id AS target, type(r) AS type, properties(r) AS properties
+            """,
+            {"pairs": pairs},
+        )
 
     async def get_nodeset_subgraph(
         self, node_type: Type[Any], node_name: List[str], node_name_filter_operator: str = "OR"
