@@ -113,8 +113,19 @@ dependencies = [
 # add_data_points changed only which nodes it embeds; its graph writes,
 # chunk_ownership and create_chunk_associations have no diff, so the
 # by_document invariant in the README still holds.
+#
+# 📌 1.6.6 -> 1.6.7 is interface-inert for this adapter. The tag diff is 211
+# commits, and databases/graph/ and databases/unified/ have no diff. The four
+# contract files under tests/integration/infrastructure/graph/ have no diff.
+# add_data_points, chunk_ownership, create_chunk_associations and the node-id
+# migration have no diff, so the by_document invariant in the README still
+# holds. The search path calls no new graph method: get_nodeset_subgraph runs
+# only for a node_name scope with a node_type other than NodeSet, and the new
+# get_nodes call is in the global context index, whose root rebuild uses the
+# build's own writers. cognee's pins move only one way: instructor becomes an
+# optional extra.
 test = [
-  "cognee==1.6.6",
+  "cognee==1.6.7",
   "pytest>=8",
   "pytest-asyncio>=0.24",
 ]
