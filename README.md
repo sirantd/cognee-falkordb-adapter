@@ -17,8 +17,9 @@ not a production adapter.
 ## Status
 
 **Production — deployed and serving.** The TrueNAS deployment pins this
-adapter at commit `8be4615` (0.5.4) under cognee `1.6.6`, deployed 2026-10-31 —
-the same cognee the contract gate runs. All 41 methods are implemented
+adapter at commit `8be4615` (0.5.4) under cognee `1.6.6`, deployed 2026-10-31.
+`main` gates cognee `1.6.7` with the same adapter code; the deployment moves to
+it with the homelab cognee 1.6.7 bump. All 41 methods are implemented
 (the burn-down,
 `pytest -s`, reads `0/41`), ported from cognee's in-core Neo4j adapter with APOC
 replaced, the GDS block dropped, and the two `*_node_truth_state` methods taken
@@ -73,7 +74,7 @@ Three things keep the gate from passing vacuously:
   `FALKORDB_HOST:FALKORDB_PORT` — correct on a laptop, a false pass in CI, where
   20 skips read as 20 passes. CI sets `FALKORDB_REQUIRED=1` and the same fixture
   fails instead. Verified both ways against a dead port.
-- **The suite is only a drift detector while cognee is pinned.** `1.6.6`, exactly,
+- **The suite is only a drift detector while cognee is pinned.** `1.6.7`, exactly,
   and `tests/test_contract_pin.py` asserts the pin is exact, that the installed
   cognee is that pin, and that the suite still holds the same **20 cases by name**
   — so an upgrade fails here first and the diff has to be read, rather than
@@ -125,7 +126,7 @@ background (`db.indexes()` shows `UNDER CONSTRUCTION`). On FalkorDB v4.20.7 with
 ## Scope: 41 methods, not 48
 
 `GraphDBInterface` declares 48 public methods. Counted against cognee 1.4.1 and
-**not re-counted against the current 1.6.6 pin** — `test_surface.py` is what
+**not re-counted against the current 1.6.7 pin** — `test_surface.py` is what
 would catch a change in the interface, not this table:
 
 | bucket | count | implemented here |
@@ -172,8 +173,9 @@ of:
 🚨 **That is complete only under an invariant of cognee's write path: an edge
 carrying document D's ref has an endpoint that also carries a D ref, or is
 chunk→chunk. Re-verify it on every cognee bump.** Checked against 1.5.4, and
-re-checked unchanged at 1.6.1, 1.6.3, 1.6.4, 1.6.5 and 1.6.6 (the global context
-index writes more edge kinds there, all with the same dataset-level key):
+re-checked unchanged at 1.6.1, 1.6.3, 1.6.4, 1.6.5, 1.6.6 and 1.6.7 (the global
+context index writes more edge kinds there, all with the same dataset-level key;
+1.6.7's root rebuild after a delete uses the same writers):
 `add_data_points` (nodes and edges from one model walk, same fold key),
 chunk-scoped ownership (a chunk's v2 key goes on its walk's nodes and edges;
 produced relationship edges join the chunk's own entities), the global context
@@ -185,7 +187,7 @@ D's ref between two *other* documents' chunks — which is what the chunk sweep
 covers.
 
 ⚠ **Known, tested limitation:** an edge carrying D's ref whose endpoints do not
-own D and that is not chunk→chunk is not returned. No 1.5.4, 1.6.1, 1.6.3, 1.6.4, 1.6.5 or 1.6.6 write path
+own D and that is not chunk→chunk is not returned. No 1.5.4, 1.6.1, 1.6.3, 1.6.4, 1.6.5, 1.6.6 or 1.6.7 write path
 makes one; if a future one does, the edge keeps a stale ref (a leak, never an
 over-delete) and `delete_by_dataset` still removes it.
 
